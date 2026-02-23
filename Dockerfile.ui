@@ -4,17 +4,12 @@ WORKDIR /app
 
 RUN corepack enable
 
-ENV NEXT_DISABLE_SWC_DOWNLOAD=1 \
-    NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1
 
 COPY ui/package.json ui/pnpm-lock.yaml ./
 RUN pnpm install --no-frozen-lockfile
 
 COPY ui ./
-
-# Force Babel mode for arm/v7 builds where Next SWC binary may be unavailable.
-RUN test -f .babelrc || printf '{\n  "presets": ["next/babel"]\n}\n' > .babelrc
-RUN pnpm add --prod @babel/runtime@^7.27.0
 
 ARG NEXT_PUBLIC_API_BASE=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    platform: linux/arm/v7
+    platform: linux/arm64
     env_file:
       - .env
     environment:
@@ -27,7 +27,7 @@ services:
       dockerfile: Dockerfile.ui
       args:
         NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
-    platform: linux/arm/v7
+    platform: linux/arm64
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
     ports:
