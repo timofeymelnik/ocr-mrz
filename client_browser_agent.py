@@ -89,15 +89,13 @@ def create_app() -> FastAPI:
     app = FastAPI(title="OCR MRZ Client Browser Agent", version="1.0.0")
     allowed_origins_env = os.getenv("CLIENT_AGENT_ALLOWED_ORIGINS", "").strip()
     allowed_origins = [v.strip() for v in allowed_origins_env.split(",") if v.strip()]
+    allowed_origin_regex = os.getenv("CLIENT_AGENT_ALLOWED_ORIGIN_REGEX", "").strip() or None
     if not allowed_origins:
-        allowed_origins = [
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://192.168.1.145:3000",
-        ]
+        allowed_origins = ["*"]
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
+        allow_origin_regex=allowed_origin_regex,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
