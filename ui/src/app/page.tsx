@@ -1,0 +1,1309 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { AlertCircle, CheckCircle2, FileUp, Loader2 } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
+import type {
+  AutofillValidationResponse,
+  AutofillPreviewResponse,
+  EnrichByIdentityResponse,
+  Payload,
+  SavedCrmDocument,
+  UploadResponse,
+} from "@/lib/types";
+
+type Step = "upload" | "review" | "prepare" | "autofill";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
+function toUrl(path: string): string {
+  if (!path) return "";
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  return `${API_BASE}${path}`;
+}
+
+function ddmmyyyyToIso(value: string): string {
+  const v = (value || "").trim();
+  const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return "";
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+function isoToDdmmyyyy(value: string): string {
+  const v = (value || "").trim();
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
+function splitDdmmyyyy(value: string): { day: string; month: string; year: string } {
+  const v = (value || "").trim();
+  const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return { day: "", month: "", year: "" };
+  return { day: m[1], month: m[2], year: m[3] };
+}
+
+function composeDdmmyyyy(day: string, month: string, year: string): string {
+  const d = (day || "").replace(/\D/g, "").slice(0, 2);
+  const m = (month || "").replace(/\D/g, "").slice(0, 2);
+  const y = (year || "").replace(/\D/g, "").slice(0, 4);
+  if (d.length === 2 && m.length === 2 && y.length === 4) return `${d}/${m}/${y}`;
+  return "";
+}
+
+function splitFullName(value: string): { primer_apellido: string; segundo_apellido: string; nombre: string } {
+  const raw = (value || "").trim();
+  if (!raw) return { primer_apellido: "", segundo_apellido: "", nombre: "" };
+  if (raw.includes(",")) {
+    const [left, right] = raw.split(",", 2).map((x) => x.trim());
+    const parts = left.split(/\s+/).filter(Boolean);
+    return {
+      primer_apellido: parts[0] || "",
+      segundo_apellido: parts.slice(1).join(" "),
+      nombre: right || "",
+    };
+  }
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return { primer_apellido: parts[0], segundo_apellido: "", nombre: "" };
+  if (parts.length === 2) return { primer_apellido: parts[0], segundo_apellido: "", nombre: parts[1] };
+  return { primer_apellido: parts[0], segundo_apellido: parts[1], nombre: parts.slice(2).join(" ") };
+}
+
+function composeFullName(primer_apellido: string, segundo_apellido: string, nombre: string): string {
+  const left = [primer_apellido.trim(), segundo_apellido.trim()].filter(Boolean).join(" ").trim();
+  const right = nombre.trim();
+  if (left && right) return `${left}, ${right}`;
+  return left || right;
+}
+
+function parseNieParts(value: string): { prefix: string; number: string; suffix: string } {
+  const s = (value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const m = s.match(/^([XYZ])(\d{7})([A-Z])$/);
+  if (!m) return { prefix: "", number: "", suffix: "" };
+  return { prefix: m[1], number: m[2], suffix: m[3] };
+}
+
+function composeNie(prefix: string, number: string, suffix: string): string {
+  const p = (prefix || "").toUpperCase().replace(/[^XYZ]/g, "");
+  const n = (number || "").replace(/\D/g, "").slice(0, 7);
+  const s = (suffix || "").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 1);
+  if (p && n.length === 7 && s) return `${p}${n}${s}`;
+  return "";
+}
+
+async function readErrorResponse(resp: Response): Promise<string> {
+  const text = await resp.text();
+  if (!text) return `Request failed (${resp.status})`;
+  try {
+    const parsed = JSON.parse(text) as { detail?: string; message?: string };
+    if (parsed.detail) return parsed.detail;
+    if (parsed.message) return parsed.message;
+  } catch {
+    // keep original text fallback
+  }
+  return text;
+}
+
+export default function HomePage() {
+  const [step, setStep] = useState<Step>("upload");
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [documentId, setDocumentId] = useState("");
+  const [payload, setPayload] = useState<Payload | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [formUrl, setFormUrl] = useState("");
+  const [targetUrl, setTargetUrl] = useState("");
+  const [browserSessionId, setBrowserSessionId] = useState("");
+  const [browserSessionAlive, setBrowserSessionAlive] = useState(false);
+  const [browserCurrentUrl, setBrowserCurrentUrl] = useState("");
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+  const [manualSteps, setManualSteps] = useState<string[]>([]);
+  const [autofill, setAutofill] = useState<AutofillPreviewResponse | null>(null);
+  const [validationReport, setValidationReport] = useState<AutofillValidationResponse | null>(null);
+  const [validationFilter, setValidationFilter] = useState<"errors" | "all">("errors");
+  const [mapperStatus, setMapperStatus] = useState("");
+  const [mapperPdfFile, setMapperPdfFile] = useState<File | null>(null);
+  const [savingMapperFromPage, setSavingMapperFromPage] = useState(false);
+  const [niePrefix, setNiePrefix] = useState("");
+  const [nieNumber, setNieNumber] = useState("");
+  const [nieSuffix, setNieSuffix] = useState("");
+  const [primerApellido, setPrimerApellido] = useState("");
+  const [segundoApellido, setSegundoApellido] = useState("");
+  const [nombreSolo, setNombreSolo] = useState("");
+  const [fechaDia, setFechaDia] = useState("");
+  const [fechaMes, setFechaMes] = useState("");
+  const [fechaAnio, setFechaAnio] = useState("");
+  const [fechaNacimientoDia, setFechaNacimientoDia] = useState("");
+  const [fechaNacimientoMes, setFechaNacimientoMes] = useState("");
+  const [fechaNacimientoAnio, setFechaNacimientoAnio] = useState("");
+  const [savedDocs, setSavedDocs] = useState<SavedCrmDocument[]>([]);
+  const [savedDocsFilter, setSavedDocsFilter] = useState("");
+  const [loadingSavedDocs, setLoadingSavedDocs] = useState(false);
+  const [identityMatchFound, setIdentityMatchFound] = useState(false);
+  const [identitySourceDocumentId, setIdentitySourceDocumentId] = useState("");
+  const [enrichmentPreview, setEnrichmentPreview] = useState<
+    Array<{ field: string; current_value: string; suggested_value: string; source?: string; reason?: string }>
+  >([]);
+  const [enriching, setEnriching] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [error, setError] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void loadSavedDocuments(savedDocsFilter);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [savedDocsFilter]);
+
+  function resetWorkflow() {
+    setStep("upload");
+    setFile(null);
+    setUploading(false);
+    setSaving(false);
+    setDocumentId("");
+    setPayload(null);
+    setPreviewUrl("");
+    setFormUrl("");
+    setTargetUrl("");
+    setBrowserSessionId("");
+    setBrowserSessionAlive(false);
+    setBrowserCurrentUrl("");
+    setMissingFields([]);
+    setManualSteps([]);
+    setAutofill(null);
+    setValidationReport(null);
+    setMapperStatus("");
+    setMapperPdfFile(null);
+    setSavingMapperFromPage(false);
+    setNiePrefix("");
+    setNieNumber("");
+    setNieSuffix("");
+    setPrimerApellido("");
+    setSegundoApellido("");
+    setNombreSolo("");
+    setFechaDia("");
+    setFechaMes("");
+    setFechaAnio("");
+    setFechaNacimientoDia("");
+    setFechaNacimientoMes("");
+    setFechaNacimientoAnio("");
+    setIdentityMatchFound(false);
+    setIdentitySourceDocumentId("");
+    setEnrichmentPreview([]);
+    setValidationFilter("errors");
+    setError("");
+    setDragOver(false);
+  }
+
+  async function loadSavedDocuments(query: string) {
+    setLoadingSavedDocs(true);
+    try {
+      const params = new URLSearchParams();
+      if (query.trim()) params.set("query", query.trim());
+      params.set("limit", "100");
+      const resp = await fetch(`${API_BASE}/api/crm/documents?${params.toString()}`);
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = (await resp.json()) as { items?: SavedCrmDocument[] };
+      setSavedDocs(data.items || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed loading saved documents");
+    } finally {
+      setLoadingSavedDocs(false);
+    }
+  }
+
+  function syncNamePartsFromPayload(nextPayload: Payload | null) {
+    if (!nextPayload) {
+      setNiePrefix("");
+      setNieNumber("");
+      setNieSuffix("");
+      setPrimerApellido("");
+      setSegundoApellido("");
+      setNombreSolo("");
+      setFechaDia("");
+      setFechaMes("");
+      setFechaAnio("");
+      setFechaNacimientoDia("");
+      setFechaNacimientoMes("");
+      setFechaNacimientoAnio("");
+      return;
+    }
+    const ident = nextPayload.identificacion || ({ nif_nie: "", nombre_apellidos: "" } as Payload["identificacion"]);
+    const nie = parseNieParts(ident.nif_nie || "");
+    setNiePrefix(nie.prefix);
+    setNieNumber(nie.number);
+    setNieSuffix(nie.suffix);
+    const split = splitFullName(ident.nombre_apellidos || "");
+    setPrimerApellido((ident.primer_apellido || split.primer_apellido || "").trim());
+    setSegundoApellido((ident.segundo_apellido || split.segundo_apellido || "").trim());
+    setNombreSolo((ident.nombre || split.nombre || "").trim());
+    const decl = splitDdmmyyyy(nextPayload.declarante?.fecha || "");
+    setFechaDia((nextPayload.declarante?.fecha_dia || decl.day || "").trim());
+    setFechaMes((nextPayload.declarante?.fecha_mes || decl.month || "").trim());
+    setFechaAnio((nextPayload.declarante?.fecha_anio || decl.year || "").trim());
+    const birth = splitDdmmyyyy(nextPayload.extra?.fecha_nacimiento || "");
+    setFechaNacimientoDia((nextPayload.extra?.fecha_nacimiento_dia || birth.day || "").trim());
+    setFechaNacimientoMes((nextPayload.extra?.fecha_nacimiento_mes || birth.month || "").trim());
+    setFechaNacimientoAnio((nextPayload.extra?.fecha_nacimiento_anio || birth.year || "").trim());
+  }
+
+  async function openSavedDocument(documentIdToOpen: string) {
+    setSaving(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/crm/documents/${documentIdToOpen}`);
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = (await resp.json()) as UploadResponse;
+      setDocumentId(data.document_id);
+      setPayload(data.payload);
+      syncNamePartsFromPayload(data.payload);
+      setPreviewUrl(toUrl(data.preview_url || ""));
+      setFormUrl(data.form_url);
+      setTargetUrl(data.target_url || data.form_url);
+      setBrowserSessionId("");
+      setBrowserSessionAlive(false);
+      setBrowserCurrentUrl("");
+      setMissingFields(data.missing_fields || []);
+      setManualSteps(data.manual_steps_required || []);
+      setIdentityMatchFound(Boolean(data.identity_match_found));
+      setIdentitySourceDocumentId(data.identity_source_document_id || "");
+      setEnrichmentPreview((data.enrichment_preview || []) as Array<{ field: string; current_value: string; suggested_value: string; source?: string }>);
+      setAutofill(null);
+      setValidationReport(null);
+      setMapperStatus("");
+      setStep("review");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed opening saved document");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function patchPayload(section: keyof Payload, key: string, value: string) {
+    if (!payload) return;
+    setPayload({
+      ...payload,
+      [section]: {
+        ...(payload[section] as Record<string, unknown>),
+        [key]: value,
+      },
+    });
+  }
+
+  function patchNifNieRaw(value: string) {
+    patchPayload("identificacion", "nif_nie", value.toUpperCase());
+    const nie = parseNieParts(value);
+    setNiePrefix(nie.prefix);
+    setNieNumber(nie.number);
+    setNieSuffix(nie.suffix);
+  }
+
+  function patchNiePart(kind: "prefix" | "number" | "suffix", value: string) {
+    const nextPrefix = kind === "prefix" ? value : niePrefix;
+    const nextNumber = kind === "number" ? value : nieNumber;
+    const nextSuffix = kind === "suffix" ? value : nieSuffix;
+    if (kind === "prefix") setNiePrefix(value.toUpperCase().replace(/[^XYZ]/g, "").slice(0, 1));
+    if (kind === "number") setNieNumber(value.replace(/\D/g, "").slice(0, 7));
+    if (kind === "suffix") setNieSuffix(value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 1));
+    const composed = composeNie(nextPrefix, nextNumber, nextSuffix);
+    if (composed) patchPayload("identificacion", "nif_nie", composed);
+  }
+
+  function patchSplitNameAndCompose(kind: "primer_apellido" | "segundo_apellido" | "nombre", value: string) {
+    const nextPrimer = kind === "primer_apellido" ? value : primerApellido;
+    const nextSegundo = kind === "segundo_apellido" ? value : segundoApellido;
+    const nextNombre = kind === "nombre" ? value : nombreSolo;
+    if (kind === "primer_apellido") setPrimerApellido(value);
+    if (kind === "segundo_apellido") setSegundoApellido(value);
+    if (kind === "nombre") setNombreSolo(value);
+    patchPayload("identificacion", "primer_apellido", nextPrimer);
+    patchPayload("identificacion", "segundo_apellido", nextSegundo);
+    patchPayload("identificacion", "nombre", nextNombre);
+    patchPayload("identificacion", "nombre_apellidos", composeFullName(nextPrimer, nextSegundo, nextNombre));
+  }
+
+  function patchExtra(key: string, value: string) {
+    if (!payload) return;
+    setPayload({
+      ...payload,
+      extra: {
+        ...(payload.extra || {}),
+        [key]: value,
+      },
+    });
+  }
+
+  function patchDeclaranteDatePart(kind: "day" | "month" | "year", value: string) {
+    const clean = value.replace(/\D/g, "").slice(0, kind === "year" ? 4 : 2);
+    const nextDay = kind === "day" ? clean : fechaDia;
+    const nextMonth = kind === "month" ? clean : fechaMes;
+    const nextYear = kind === "year" ? clean : fechaAnio;
+    if (kind === "day") setFechaDia(clean);
+    if (kind === "month") setFechaMes(clean);
+    if (kind === "year") setFechaAnio(clean);
+    patchPayload("declarante", "fecha_dia", nextDay);
+    patchPayload("declarante", "fecha_mes", nextMonth);
+    patchPayload("declarante", "fecha_anio", nextYear);
+    const composed = composeDdmmyyyy(nextDay, nextMonth, nextYear);
+    if (composed) patchPayload("declarante", "fecha", composed);
+  }
+
+  function patchNacimientoDatePart(kind: "day" | "month" | "year", value: string) {
+    const clean = value.replace(/\D/g, "").slice(0, kind === "year" ? 4 : 2);
+    const nextDay = kind === "day" ? clean : fechaNacimientoDia;
+    const nextMonth = kind === "month" ? clean : fechaNacimientoMes;
+    const nextYear = kind === "year" ? clean : fechaNacimientoAnio;
+    if (kind === "day") setFechaNacimientoDia(clean);
+    if (kind === "month") setFechaNacimientoMes(clean);
+    if (kind === "year") setFechaNacimientoAnio(clean);
+    patchExtra("fecha_nacimiento_dia", nextDay);
+    patchExtra("fecha_nacimiento_mes", nextMonth);
+    patchExtra("fecha_nacimiento_anio", nextYear);
+    const composed = composeDdmmyyyy(nextDay, nextMonth, nextYear);
+    if (composed) patchExtra("fecha_nacimiento", composed);
+  }
+
+  function patchDeclaranteDate(day: string, month: string, year: string) {
+    setFechaDia(day);
+    setFechaMes(month);
+    setFechaAnio(year);
+    patchPayload("declarante", "fecha_dia", day);
+    patchPayload("declarante", "fecha_mes", month);
+    patchPayload("declarante", "fecha_anio", year);
+    const composed = composeDdmmyyyy(day, month, year);
+    if (composed) patchPayload("declarante", "fecha", composed);
+  }
+
+  function patchNacimientoDate(day: string, month: string, year: string) {
+    setFechaNacimientoDia(day);
+    setFechaNacimientoMes(month);
+    setFechaNacimientoAnio(year);
+    patchExtra("fecha_nacimiento_dia", day);
+    patchExtra("fecha_nacimiento_mes", month);
+    patchExtra("fecha_nacimiento_anio", year);
+    const composed = composeDdmmyyyy(day, month, year);
+    if (composed) patchExtra("fecha_nacimiento", composed);
+  }
+
+  function onFileSelected(next: File | null) {
+    setFile(next);
+    setError("");
+  }
+
+  async function saveMapperFromPageVariables() {
+    if (!documentId || !browserSessionId) {
+      setError("Сначала откройте управляемую сессию.");
+      return;
+    }
+    setSavingMapperFromPage(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/mapping/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overwrite: true, use_auto_pdf_fallback: true }),
+      });
+      if (!resp.ok) throw new Error(await readErrorResponse(resp));
+      const data = (await resp.json()) as {
+        mappings_count?: number;
+        current_url?: string;
+        unknown_vars?: string[];
+        mapping_source?: string;
+      };
+      const unknown = (data.unknown_vars || []).length
+        ? ` Неизвестные переменные: ${(data.unknown_vars || []).join(", ")}`
+        : "";
+      setMapperStatus(
+        `Mapper сохранен из страницы: mappings=${data.mappings_count || 0}, source=${data.mapping_source || "placeholder"}.${unknown}`,
+      );
+      if (data.current_url) setBrowserCurrentUrl(data.current_url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось сохранить mapper из полей страницы");
+    } finally {
+      setSavingMapperFromPage(false);
+    }
+  }
+
+  async function uploadPdfTemplateMapper() {
+    if (!documentId || !browserSessionId) {
+      setError("Сначала откройте управляемую сессию.");
+      return;
+    }
+    if (!mapperPdfFile) {
+      setError("Выберите PDF шаблон.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const fd = new FormData();
+      fd.append("file", mapperPdfFile);
+      fd.append("overwrite", "true");
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/mapping/import-template-pdf`, {
+        method: "POST",
+        body: fd,
+      });
+      if (!resp.ok) throw new Error(await readErrorResponse(resp));
+      const data = (await resp.json()) as { mappings_count?: number; current_url?: string; warnings?: string[] };
+      const warn = (data.warnings || []).length ? ` Предупреждения:\n${(data.warnings || []).join("\n")}` : "";
+      setMapperStatus(`PDF-шаблон импортирован. mappings=${data.mappings_count || 0}.${warn}`);
+      if (data.current_url) setBrowserCurrentUrl(data.current_url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось импортировать PDF шаблон");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function uploadDocument() {
+    if (!file) {
+      setError("Выберите файл .jpg/.jpeg/.png/.pdf");
+      return;
+    }
+    setUploading(true);
+    setError("");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const resp = await fetch(`${API_BASE}/api/documents/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text || `Upload failed (${resp.status})`);
+      }
+      const data: UploadResponse = await resp.json();
+      setDocumentId(data.document_id);
+      setPayload(data.payload);
+      syncNamePartsFromPayload(data.payload);
+      setPreviewUrl(toUrl(data.preview_url));
+      setFormUrl(data.form_url);
+      setTargetUrl(data.target_url || data.form_url);
+      setBrowserSessionId("");
+      setBrowserSessionAlive(false);
+      setBrowserCurrentUrl("");
+      setMissingFields(data.missing_fields || []);
+      setManualSteps(data.manual_steps_required || []);
+      setIdentityMatchFound(Boolean(data.identity_match_found));
+      setIdentitySourceDocumentId(data.identity_source_document_id || "");
+      setEnrichmentPreview((data.enrichment_preview || []) as Array<{ field: string; current_value: string; suggested_value: string; source?: string }>);
+      setValidationReport(null);
+      setMapperStatus("");
+      setStep("review");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function confirmData() {
+    if (!payload || !documentId) return;
+    setSaving(true);
+    setError("");
+    try {
+      const composedNie = composeNie(niePrefix, nieNumber, nieSuffix);
+      const normalizedPayload: Payload = {
+        ...payload,
+        identificacion: {
+          ...payload.identificacion,
+          nif_nie: composedNie || payload.identificacion.nif_nie,
+          primer_apellido: primerApellido,
+          segundo_apellido: segundoApellido,
+          nombre: nombreSolo,
+          nombre_apellidos: composeFullName(primerApellido, segundoApellido, nombreSolo),
+        },
+        declarante: {
+          ...payload.declarante,
+          fecha: composeDdmmyyyy(fechaDia, fechaMes, fechaAnio) || payload.declarante.fecha,
+          fecha_dia: fechaDia,
+          fecha_mes: fechaMes,
+          fecha_anio: fechaAnio,
+        },
+        extra: {
+          ...(payload.extra || {}),
+          fecha_nacimiento:
+            composeDdmmyyyy(fechaNacimientoDia, fechaNacimientoMes, fechaNacimientoAnio) ||
+            payload.extra?.fecha_nacimiento ||
+            "",
+          fecha_nacimiento_dia: fechaNacimientoDia,
+          fecha_nacimiento_mes: fechaNacimientoMes,
+          fecha_nacimiento_anio: fechaNacimientoAnio,
+        },
+      };
+      const confirmResp = await fetch(`${API_BASE}/api/documents/${documentId}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: normalizedPayload }),
+      });
+      if (!confirmResp.ok) {
+        throw new Error(await readErrorResponse(confirmResp));
+      }
+      const confirmed = await confirmResp.json();
+      const confirmedPayload = (confirmed.payload as Payload) || normalizedPayload;
+      setPayload(confirmedPayload);
+      syncNamePartsFromPayload(confirmedPayload);
+      setMissingFields(confirmed.missing_fields || []);
+      setIdentityMatchFound(Boolean(confirmed.identity_match_found));
+      setIdentitySourceDocumentId(confirmed.identity_source_document_id || "");
+      setEnrichmentPreview((confirmed.enrichment_preview || []) as Array<{ field: string; current_value: string; suggested_value: string; source?: string }>);
+      setStep("prepare");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Confirm failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function applyIdentityEnrichment() {
+    if (!documentId) return;
+    setEnriching(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/enrich-by-identity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apply: true }),
+      });
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = (await resp.json()) as EnrichByIdentityResponse;
+      setPayload(data.payload);
+      syncNamePartsFromPayload(data.payload);
+      setMissingFields(data.missing_fields || []);
+      setIdentityMatchFound(Boolean(data.identity_match_found));
+      setIdentitySourceDocumentId(data.identity_source_document_id || "");
+      setEnrichmentPreview(data.enrichment_preview || []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Identity enrichment failed");
+    } finally {
+      setEnriching(false);
+    }
+  }
+
+  async function openManagedSession() {
+    if (!documentId) return;
+    if (!targetUrl.trim()) {
+      setError("Укажите адрес страницы или PDF.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_url: targetUrl,
+          headless: false,
+          slowmo: 40,
+          timeout_ms: 30000,
+        }),
+      });
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = await resp.json();
+      setBrowserSessionId(data.session_id || "");
+      setBrowserSessionAlive(Boolean(data.alive));
+      setBrowserCurrentUrl(data.current_url || "");
+      setTargetUrl(data.target_url || targetUrl);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to open browser session");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function refreshManagedSessionState() {
+    if (!documentId || !browserSessionId) return;
+    setSaving(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/state`);
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = await resp.json();
+      setBrowserSessionAlive(Boolean(data.alive));
+      setBrowserCurrentUrl(data.current_url || "");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to refresh browser session state");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function closeManagedSession() {
+    if (!documentId) return;
+    setSaving(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/close`, {
+        method: "POST",
+      });
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      setBrowserSessionId("");
+      setBrowserSessionAlive(false);
+      setBrowserCurrentUrl("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to close browser session");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runAutofillFromManagedSession() {
+    if (!payload || !documentId) return;
+    if (!browserSessionId) {
+      setError("Сначала нажмите 'Перейти по адресу' и откройте управляемую сессию.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const autoResp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/fill`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          payload,
+          timeout_ms: 25000,
+          fill_strategy: "strict_template",
+        }),
+      });
+      if (!autoResp.ok) {
+        throw new Error(await readErrorResponse(autoResp));
+      }
+      const autoData: AutofillPreviewResponse = await autoResp.json();
+      setAutofill({
+        ...autoData,
+        screenshot_url: toUrl(autoData.screenshot_url),
+        dom_snapshot_url: toUrl(autoData.dom_snapshot_url),
+        filled_pdf_url: autoData.filled_pdf_url ? toUrl(autoData.filled_pdf_url) : "",
+      });
+      setValidationReport(null);
+      setFormUrl(autoData.form_url || targetUrl || formUrl);
+      setManualSteps(autoData.manual_steps_required || []);
+      setMissingFields(autoData.missing_fields || []);
+      setStep("autofill");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Autofill in opened browser session failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function validateFilledPdf() {
+    if (!documentId) return;
+    if (!autofill?.filled_pdf_url) {
+      setError("Сначала выполните заполнение, чтобы получить filled PDF.");
+      return;
+    }
+    setValidating(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/autofill-validate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filled_pdf_url: autofill.filled_pdf_url }),
+      });
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = (await resp.json()) as AutofillValidationResponse;
+      if (data.filled_pdf_url) {
+        data.filled_pdf_url = toUrl(data.filled_pdf_url);
+      }
+      setValidationReport(data);
+      setValidationFilter("errors");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Validation failed");
+    } finally {
+      setValidating(false);
+    }
+  }
+
+  return (
+    <main className="mx-auto min-h-screen max-w-[1400px] p-6">
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Tasa OCR Workspace</h1>
+          <p className="text-sm text-muted-foreground">
+            Загрузка документа, верификация данных, autofill полей заявителя и ручной handoff.
+          </p>
+        </div>
+        <Badge variant="secondary">{step.toUpperCase()}</Badge>
+      </div>
+
+      {error ? (
+        <Card className="mb-4 border-red-300">
+          <CardContent className="flex items-center gap-2 p-4 text-sm text-red-700">
+            <AlertCircle className="h-4 w-4" />
+            <span>{error}</span>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {step === "upload" ? (
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_420px]">
+          <Card>
+            <CardHeader>
+              <CardTitle>Загрузка исходника</CardTitle>
+              <CardDescription>Поддерживаются изображения и PDF. Можно перетащить файл в зону ниже.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div
+                className={`rounded-lg border-2 border-dashed p-10 text-center transition ${
+                  dragOver ? "border-primary bg-primary/5" : "border-border"
+                }`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  const next = e.dataTransfer.files?.[0] || null;
+                  onFileSelected(next);
+                }}
+              >
+                <FileUp className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">Перетащите файл сюда или выберите через input</p>
+                <Input
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.pdf"
+                  className="mx-auto mt-4 max-w-md"
+                  onChange={(e) => onFileSelected(e.target.files?.[0] || null)}
+                />
+                {file ? <p className="mt-3 text-sm font-medium">{file.name}</p> : null}
+              </div>
+              <Button onClick={uploadDocument} disabled={!file || uploading}>
+                {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Запустить OCR и парсинг
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="h-[calc(100vh-180px)] overflow-auto">
+            <CardHeader>
+              <CardTitle>Сохраненные документы (CRM)</CardTitle>
+              <CardDescription>Поиск по имени или номеру документа.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Input
+                placeholder="Фильтр: имя или номер документа"
+                value={savedDocsFilter}
+                onChange={(e) => setSavedDocsFilter(e.target.value)}
+              />
+              <Button variant="outline" onClick={() => loadSavedDocuments(savedDocsFilter)} disabled={loadingSavedDocs}>
+                {loadingSavedDocs ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Обновить список
+              </Button>
+              <div className="space-y-2">
+                {(savedDocs || []).map((item) => (
+                  <div key={item.document_id} className="rounded-md border p-3">
+                    <div className="text-sm font-medium">{item.name || "Без имени"}</div>
+                    <div className="text-xs text-muted-foreground">{item.document_number || "Без номера"}</div>
+                    <div className="text-xs text-muted-foreground">{item.updated_at || ""}</div>
+                    <div className="mt-2 flex gap-2">
+                      <Button size="sm" onClick={() => openSavedDocument(item.document_id)} disabled={saving}>
+                        Открыть
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+                {!loadingSavedDocs && savedDocs.length === 0 ? (
+                  <div className="rounded-md border p-3 text-sm text-muted-foreground">Нет сохраненных документов.</div>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      {step === "review" && payload ? (
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[520px_1fr]">
+          <Card className="h-[calc(100vh-180px)] overflow-auto">
+            <CardHeader>
+              <CardTitle>Проверка и правка данных</CardTitle>
+              <CardDescription>
+                Подтвердите данные заявителя. Trámite, CAPTCHA и скачивание останутся на человеке.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">Identificación</h3>
+                <Label>NIE (буква + 7 цифр + буква)</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  <Input placeholder="Y" value={niePrefix} onChange={(e) => patchNiePart("prefix", e.target.value)} />
+                  <Input placeholder="1234567" value={nieNumber} onChange={(e) => patchNiePart("number", e.target.value)} />
+                  <Input placeholder="X" value={nieSuffix} onChange={(e) => patchNiePart("suffix", e.target.value)} />
+                </div>
+                <Label>NIF/NIE (raw, если не NIE)</Label>
+                <Input value={payload.identificacion.nif_nie} onChange={(e) => patchNifNieRaw(e.target.value)} />
+                <Label>Pasaporte (опционально)</Label>
+                <Input
+                  value={payload.identificacion.pasaporte || ""}
+                  onChange={(e) => patchPayload("identificacion", "pasaporte", e.target.value)}
+                />
+                <div className="grid grid-cols-1 gap-2 pt-1 md:grid-cols-3">
+                  <div>
+                    <Label>Primer apellido</Label>
+                    <Input value={primerApellido} onChange={(e) => patchSplitNameAndCompose("primer_apellido", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Segundo apellido</Label>
+                    <Input value={segundoApellido} onChange={(e) => patchSplitNameAndCompose("segundo_apellido", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Nombre</Label>
+                    <Input value={nombreSolo} onChange={(e) => patchSplitNameAndCompose("nombre", e.target.value)} />
+                  </div>
+                </div>
+              </section>
+
+              <Separator />
+
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">Domicilio</h3>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label>Tipo vía</Label>
+                    <Input value={payload.domicilio.tipo_via} onChange={(e) => patchPayload("domicilio", "tipo_via", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Nombre vía</Label>
+                    <Input
+                      value={payload.domicilio.nombre_via}
+                      onChange={(e) => patchPayload("domicilio", "nombre_via", e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <Label>Número</Label>
+                    <Input value={payload.domicilio.numero} onChange={(e) => patchPayload("domicilio", "numero", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Teléfono</Label>
+                    <Input value={payload.domicilio.telefono} onChange={(e) => patchPayload("domicilio", "telefono", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Municipio</Label>
+                    <Input value={payload.domicilio.municipio} onChange={(e) => patchPayload("domicilio", "municipio", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Provincia</Label>
+                    <Input value={payload.domicilio.provincia} onChange={(e) => patchPayload("domicilio", "provincia", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>CP</Label>
+                    <Input value={payload.domicilio.cp} onChange={(e) => patchPayload("domicilio", "cp", e.target.value)} />
+                  </div>
+                </div>
+              </section>
+
+              <Separator />
+
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">Declarante / Ingreso</h3>
+                <Label>Localidad declaración</Label>
+                <Input value={payload.declarante.localidad} onChange={(e) => patchPayload("declarante", "localidad", e.target.value)} />
+                <Label>Fecha (dd/mm/yyyy)</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  <Input placeholder="dd" value={fechaDia} onChange={(e) => patchDeclaranteDatePart("day", e.target.value)} />
+                  <Input placeholder="mm" value={fechaMes} onChange={(e) => patchDeclaranteDatePart("month", e.target.value)} />
+                  <Input placeholder="yyyy" value={fechaAnio} onChange={(e) => patchDeclaranteDatePart("year", e.target.value)} />
+                </div>
+                <Input
+                  type="date"
+                  value={ddmmyyyyToIso(composeDdmmyyyy(fechaDia, fechaMes, fechaAnio) || payload.declarante.fecha)}
+                  onChange={(e) => {
+                    const next = isoToDdmmyyyy(e.target.value);
+                    const parts = splitDdmmyyyy(next);
+                    patchDeclaranteDate(parts.day, parts.month, parts.year);
+                  }}
+                />
+                <Label>Forma de pago</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={payload.ingreso.forma_pago || "efectivo"}
+                  onChange={(e) => patchPayload("ingreso", "forma_pago", e.target.value)}
+                >
+                  <option value="efectivo">efectivo</option>
+                  <option value="adeudo">adeudo</option>
+                </select>
+                <Label>IBAN</Label>
+                <Input value={payload.ingreso.iban} onChange={(e) => patchPayload("ingreso", "iban", e.target.value)} />
+              </section>
+
+              <Separator />
+
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">Дополнительные персональные поля (CRM)</h3>
+                <Label>Email</Label>
+                <Input value={payload.extra?.email || ""} onChange={(e) => patchExtra("email", e.target.value)} />
+                <Label>Fecha de nacimiento (DD/MM/YYYY)</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  <Input
+                    placeholder="dd"
+                    value={fechaNacimientoDia}
+                    onChange={(e) => patchNacimientoDatePart("day", e.target.value)}
+                  />
+                  <Input
+                    placeholder="mm"
+                    value={fechaNacimientoMes}
+                    onChange={(e) => patchNacimientoDatePart("month", e.target.value)}
+                  />
+                  <Input
+                    placeholder="yyyy"
+                    value={fechaNacimientoAnio}
+                    onChange={(e) => patchNacimientoDatePart("year", e.target.value)}
+                  />
+                </div>
+                <Input
+                  type="date"
+                  value={ddmmyyyyToIso(composeDdmmyyyy(fechaNacimientoDia, fechaNacimientoMes, fechaNacimientoAnio) || payload.extra?.fecha_nacimiento || "")}
+                  onChange={(e) => {
+                    const next = isoToDdmmyyyy(e.target.value);
+                    const parts = splitDdmmyyyy(next);
+                    patchNacimientoDate(parts.day, parts.month, parts.year);
+                  }}
+                />
+                <Label>Nacionalidad</Label>
+                <Input value={payload.extra?.nacionalidad || ""} onChange={(e) => patchExtra("nacionalidad", e.target.value)} />
+                <Label>País</Label>
+                <Input value={payload.extra?.pais_nacimiento || ""} onChange={(e) => patchExtra("pais_nacimiento", e.target.value)} />
+                <Label>Sexo</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={payload.extra?.sexo || ""}
+                  onChange={(e) => patchExtra("sexo", e.target.value)}
+                >
+                  <option value="">--</option>
+                  <option value="H">H (Hombre)</option>
+                  <option value="M">M (Mujer)</option>
+                  <option value="X">X</option>
+                </select>
+                <Label>Estado civil</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={payload.extra?.estado_civil || ""}
+                  onChange={(e) => patchExtra("estado_civil", e.target.value)}
+                >
+                  <option value="">--</option>
+                  <option value="S">S (Soltero/a)</option>
+                  <option value="C">C (Casado/a)</option>
+                  <option value="V">V (Viudo/a)</option>
+                  <option value="D">D (Divorciado/a)</option>
+                  <option value="Sp">Sp (Separado/a)</option>
+                </select>
+                <Label>Lugar de nacimiento</Label>
+                <Input
+                  value={payload.extra?.lugar_nacimiento || ""}
+                  onChange={(e) => patchExtra("lugar_nacimiento", e.target.value)}
+                />
+                <Label>Nombre del padre</Label>
+                <Input value={payload.extra?.nombre_padre || ""} onChange={(e) => patchExtra("nombre_padre", e.target.value)} />
+                <Label>Nombre de la madre</Label>
+                <Input value={payload.extra?.nombre_madre || ""} onChange={(e) => patchExtra("nombre_madre", e.target.value)} />
+                <Label>Representante legal</Label>
+                <Input
+                  value={payload.extra?.representante_legal || ""}
+                  onChange={(e) => patchExtra("representante_legal", e.target.value)}
+                />
+                <Label>DNI/NIE/PAS representante</Label>
+                <Input
+                  value={payload.extra?.representante_documento || ""}
+                  onChange={(e) => patchExtra("representante_documento", e.target.value)}
+                />
+                <Label>Título representante</Label>
+                <Input
+                  value={payload.extra?.titulo_representante || ""}
+                  onChange={(e) => patchExtra("titulo_representante", e.target.value)}
+                />
+                <Label>Hijas/os escolarización en España (SI/NO)</Label>
+                <div className="flex items-center gap-6 rounded-md border p-3">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={(payload.extra?.hijos_escolarizacion_espana || "").toUpperCase() === "SI"}
+                      onChange={(e) => patchExtra("hijos_escolarizacion_espana", e.target.checked ? "SI" : "")}
+                    />
+                    SI
+                  </label>
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={(payload.extra?.hijos_escolarizacion_espana || "").toUpperCase() === "NO"}
+                      onChange={(e) => patchExtra("hijos_escolarizacion_espana", e.target.checked ? "NO" : "")}
+                    />
+                    NO
+                  </label>
+                </div>
+              </section>
+
+              <Separator />
+
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">Identity enrichment</h3>
+                <Input
+                  readOnly
+                  value={
+                    identityMatchFound
+                      ? `Найдено совпадение по документу: ${identitySourceDocumentId || "unknown"}`
+                      : "Совпадение по NIF/NIE/DNI не найдено"
+                  }
+                />
+                <Button variant="outline" onClick={applyIdentityEnrichment} disabled={enriching || !documentId}>
+                  {enriching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Применить автодополнение
+                </Button>
+                <Label>Автодополненные поля</Label>
+                <Textarea
+                  readOnly
+                  className="min-h-[110px]"
+                  value={(enrichmentPreview || [])
+                    .map((row) => `${row.field}: '${row.current_value || ""}' -> '${row.suggested_value || ""}' (${row.source || row.reason || "match"})`)
+                    .join("\n")}
+                />
+              </section>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <Label>Validation / missing fields</Label>
+                <Textarea readOnly value={(missingFields || []).join("\n")} className="min-h-[110px]" />
+              </div>
+              <Button onClick={confirmData} disabled={saving}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                Подтвердить данные
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="h-[calc(100vh-180px)]">
+            <CardHeader>
+              <CardTitle>Превью исходного документа</CardTitle>
+              <CardDescription>Проверьте соответствие OCR-данных исходнику</CardDescription>
+            </CardHeader>
+            <CardContent className="h-[calc(100%-80px)]">
+              {previewUrl ? (
+                previewUrl.toLowerCase().includes(".pdf") ? (
+                  <iframe src={previewUrl} className="h-full w-full rounded-md border" title="Document preview" />
+                ) : (
+                  <img src={previewUrl} alt="Uploaded preview" className="h-full w-full rounded-md border object-contain" />
+                )
+              ) : (
+                <div className="rounded-md border p-4 text-sm text-muted-foreground">Превью недоступно для этого документа.</div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      {step === "prepare" ? (
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[420px_1fr]">
+          <Card className="h-[calc(100vh-180px)] overflow-auto">
+            <CardHeader>
+              <CardTitle>Подготовка к заполнению</CardTitle>
+              <CardDescription>
+                Откройте нужную страницу в отдельной вкладке, дойдите до нужного шага, затем вернитесь и запустите автозаполнение.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Текущие missing fields</Label>
+                <Textarea readOnly value={(missingFields || []).join("\n")} className="min-h-[130px]" />
+              </div>
+              <div className="space-y-2">
+                <Label>Ссылка на форму из backend</Label>
+                <Input readOnly value={formUrl} />
+              </div>
+              <div className="space-y-2">
+                <Label>Статус управляемой сессии</Label>
+                <Input readOnly value={browserSessionId ? `OPEN (${browserSessionId.slice(0, 8)}...)` : "NOT OPEN"} />
+                <Input readOnly value={`Alive: ${browserSessionAlive ? "yes" : "no"}`} />
+                <Input readOnly value={browserCurrentUrl || "Текущий URL неизвестен"} />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="h-[calc(100vh-180px)] overflow-auto">
+            <CardHeader>
+              <CardTitle>Готов к заполнению</CardTitle>
+              <CardDescription>
+                Вставьте адрес страницы или PDF, который нужно заполнить, затем нажмите запуск.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Адрес страницы/PDF</Label>
+                <Input
+                  placeholder="https://..."
+                  value={targetUrl}
+                  onChange={(e) => setTargetUrl(e.target.value)}
+                />
+              </div>
+              <Button onClick={openManagedSession} disabled={saving || !targetUrl.trim()}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Перейти по адресу (открыть управляемое окно)
+              </Button>
+              <Button onClick={refreshManagedSessionState} disabled={saving || !browserSessionId}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Обновить текущий URL в сессии
+              </Button>
+              <div className="space-y-3 rounded-md border p-3">
+                <div className="text-sm font-medium">Импорт шаблона PDF</div>
+                <div className="text-xs text-muted-foreground">
+                  Если в PDF уже есть плейсхолдеры (`{"{field}"}`), загрузите шаблон и система автоматически создаст связи.
+                </div>
+                <Input
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={(e) => setMapperPdfFile(e.target.files?.[0] || null)}
+                />
+                <Button variant="outline" onClick={uploadPdfTemplateMapper} disabled={saving || !browserSessionId || !mapperPdfFile}>
+                  Импортировать PDF шаблон
+                </Button>
+              </div>
+
+              <div className="space-y-3 rounded-md border p-3">
+                <div className="text-sm font-medium">Автосохранение маппера из страницы</div>
+                <div className="text-xs text-muted-foreground">
+                  Считывает переменные шаблона из текущих полей страницы/PDF и сохраняет mapper для текущего URL.
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={saveMapperFromPageVariables}
+                  disabled={saving || savingMapperFromPage || !browserSessionId}
+                >
+                  {savingMapperFromPage ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  Считать переменные и сохранить mapper
+                </Button>
+                <Textarea readOnly className="min-h-[70px]" value={mapperStatus || "Mapper status: not saved yet."} />
+              </div>
+              <Button onClick={runAutofillFromManagedSession} disabled={saving || !browserSessionId}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                Я готов, запустить заполнение данных
+              </Button>
+              <Button variant="outline" onClick={closeManagedSession} disabled={saving || !browserSessionId}>
+                Закрыть управляемую сессию
+              </Button>
+              <Button variant="secondary" onClick={resetWorkflow} disabled={saving}>
+                Начать сначала
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      {step === "autofill" && autofill ? (
+        <div className="grid grid-cols-1 gap-4">
+          <Card className="h-[calc(100vh-180px)] overflow-auto">
+            <CardHeader>
+              <CardTitle>Manual Handoff</CardTitle>
+              <CardDescription>
+                {autofill.mode === "pdf_pymupdf"
+                  ? "Сформирован локальный заполненный PDF. Исходная страница PDF в браузере не изменяется."
+                  : "Playwright выполнил автозаполнение полей заявителя. Дальше ручные шаги на форме."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Required manual steps</Label>
+                <Textarea readOnly value={(manualSteps || []).join("\n")} className="min-h-[90px]" />
+              </div>
+              <div className="space-y-2">
+                <Label>Autofill mode</Label>
+                <Input readOnly value={autofill.mode || "unknown"} />
+              </div>
+              {autofill.warnings?.length ? (
+                <div className="space-y-2">
+                  <Label>Warnings</Label>
+                  <Textarea readOnly value={autofill.warnings.join("\n")} className="min-h-[90px]" />
+                </div>
+              ) : null}
+              {autofill.filled_pdf_url ? (
+                <Button asChild variant="outline">
+                  <a href={autofill.filled_pdf_url} target="_blank" rel="noreferrer">
+                    Открыть заполненный PDF
+                  </a>
+                </Button>
+              ) : null}
+              <Button variant="outline" onClick={validateFilledPdf} disabled={validating || !autofill.filled_pdf_url}>
+                {validating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Проверить заполненный PDF по шаблону
+              </Button>
+              {validationReport ? (
+                <div className="space-y-2 rounded-md border p-3">
+                  <div className="text-sm font-semibold">
+                    Validation: {validationReport.matches ? "OK" : "MISMATCH"} | checked={validationReport.summary.total_checked}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant={validationFilter === "errors" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setValidationFilter("errors")}
+                    >
+                      Ошибки
+                    </Button>
+                    <Button
+                      variant={validationFilter === "all" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setValidationFilter("all")}
+                    >
+                      Все
+                    </Button>
+                  </div>
+                  <Textarea
+                    readOnly
+                    className="min-h-[160px]"
+                    value={(validationReport.field_report || [])
+                      .filter((row) => (validationFilter === "all" ? true : !row.ok))
+                      .map(
+                        (row) =>
+                          `${row.ok ? "OK" : "ERR"} ${row.selector} => ${row.canonical_key} | expected='${String(row.expected)}' actual='${String(row.actual)}' ${row.reason ? `(${row.reason})` : ""}`,
+                      )
+                      .join("\n")}
+                  />
+                </div>
+              ) : null}
+              <div className="space-y-2">
+                <Label>Fields still missing / verify manually</Label>
+                <Textarea readOnly value={(missingFields || []).join("\n")} className="min-h-[150px]" />
+              </div>
+              <Button asChild>
+                <a href={formUrl} target="_blank" rel="noreferrer">
+                  Открыть живую форму для Trámite/CAPTCHA/скачивания
+                </a>
+              </Button>
+              <Button variant="secondary" onClick={resetWorkflow} disabled={saving}>
+                Начать сначала
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+    </main>
+  );
+}

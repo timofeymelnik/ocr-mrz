@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Env files
+.env
+.env.*
+!.env.local.example
+!.env.example
+
+# Runtime and generated artifacts
+runtime/
+downloads/
+debug_ocr/
+input/
+BA.md
+output.csv
+output.jsonl
+output.jsonl.bak.*
+
+# Logs
+*.log
+
+# UI (Next.js / Node)
+ui/node_modules/
+ui/.next/
+ui/.turbo/
+ui/.pnpm-store/
+ui/tsconfig.tsbuildinfo
+ui/.env.local
+ui/.env.*.local

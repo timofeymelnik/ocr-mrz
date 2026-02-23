@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/tasa-document.schema.json",
+  "title": "NIE/TIE OCR Tasa Document",
+  "type": "object",
+  "required": [
+    "_id",
+    "schema_version",
+    "document_type",
+    "tasa_code",
+    "card_extracted",
+    "forms",
+    "validation"
+  ],
+  "properties": {
+    "_id": {
+      "type": "object",
+      "required": ["$oid"],
+      "properties": {
+        "$oid": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{24}$"
+        }
+      }
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "document_type": {
+      "type": "string",
+      "const": "nie_tie_tasa_payload"
+    },
+    "tasa_code": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object"
+    },
+    "card_extracted": {
+      "type": "object",
+      "required": ["nie_or_nif", "apellidos", "nombre", "full_name", "raw_candidates"],
+      "properties": {
+        "nie_or_nif": {"type": "string"},
+        "apellidos": {"type": "string"},
+        "nombre": {"type": "string"},
+        "full_name": {"type": "string"},
+        "fecha_nacimiento": {"type": "string"},
+        "nacionalidad": {"type": "string"},
+        "id_esp_optional": {"type": "string"},
+        "raw_candidates": {
+          "type": "object",
+          "properties": {
+            "nie_or_nif": {"type": "array", "items": {"type": "string"}},
+            "full_name": {"type": "array", "items": {"type": "string"}},
+            "address_lines": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      }
+    },
+    "forms": {
+      "type": "object",
+      "description": "Extensible map for tasa forms, example key: 790_012",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["fields", "derived"],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "derived": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "form_790_012": {
+      "type": "object"
+    },
+    "form_mi_t": {
+      "type": "object"
+    },
+    "form_visual_generic": {
+      "type": "object"
+    },
+    "validation": {
+      "type": "object",
+      "required": [
+        "ok",
+        "errors",
+        "warnings",
+        "missing_required_for_form",
+        "needs_user_input"
+      ],
+      "properties": {
+        "ok": {"type": "boolean"},
+        "errors": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "missing_required_for_form": {"type": "array", "items": {"type": "string"}},
+        "needs_user_input": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "crm_profile": {
+      "type": "object"
+    },
+    "human_tasks": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "pipeline": {
+      "type": "object"
+    },
+    "discrepancies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "field": {"type": "string"},
+          "ocr_or_override": {"type": "string"},
+          "geocode": {"type": "string"}
+        }
+      }
+    },
+    "meta": {
+      "type": "object"
+    }
+  }
+}
