@@ -34,8 +34,13 @@ def _safe(payload: dict[str, Any], *path: str) -> str:
 
 
 def _identifiers_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+    nif_nie = _safe(payload, "identificacion", "nif_nie")
+    passport = _safe(payload, "identificacion", "pasaporte")
+    primary_number = nif_nie or passport
     return {
-        "document_number": _safe(payload, "identificacion", "nif_nie"),
+        "document_number": primary_number,
+        "nif_nie": nif_nie,
+        "passport": passport,
         "name": _safe(payload, "identificacion", "nombre_apellidos"),
     }
 
@@ -91,6 +96,8 @@ class CRMRepository:
                 self._collection = client[mongo_db][mongo_collection]
                 self._collection.create_index("document_id", unique=True)
                 self._collection.create_index("identifiers.document_number")
+                self._collection.create_index("identifiers.nif_nie")
+                self._collection.create_index("identifiers.passport")
                 self._collection.create_index("identifiers.name")
                 self._collection.create_index("updated_at")
                 self._mongo_enabled = True
@@ -241,6 +248,8 @@ class CRMRepository:
                     "$or": [
                         {"identifiers.name": regex},
                         {"identifiers.document_number": regex},
+                        {"identifiers.nif_nie": regex},
+                        {"identifiers.passport": regex},
                     ]
                 }
             docs = (
@@ -277,22 +286,37 @@ class CRMRepository:
         return _dedupe_summaries(results)[:limit]
 
     def find_latest_by_identity(self, document_number: str, exclude_document_id: str = "") -> dict[str, Any] | None:
-        identity = _normalized_doc_number(document_number)
-        if not identity:
+        return self.find_latest_by_identities([document_number], exclude_document_id=exclude_document_id)
+
+    def find_latest_by_identities(self, candidates: list[str], exclude_document_id: str = "") -> dict[str, Any] | None:
+        normalized = [_normalized_doc_number(v) for v in (candidates or [])]
+        keys = [v for v in normalized if v]
+        if not keys:
             return None
 
         exclude = str(exclude_document_id or "").strip()
         if self._mongo_enabled and self._collection is not None:
             docs = self._collection.find(
-                {"identifiers.document_number": {"$exists": True, "$ne": ""}},
+                {
+                    "$or": [
+                        {"identifiers.document_number": {"$exists": True, "$ne": ""}},
+                        {"identifiers.nif_nie": {"$exists": True, "$ne": ""}},
+                        {"identifiers.passport": {"$exists": True, "$ne": ""}},
+                    ]
+                },
                 {"_id": 0},
             ).sort("updated_at", -1)
             for doc in docs:
                 item = dict(doc)
                 if exclude and str(item.get("document_id") or "") == exclude:
                     continue
-                current = _normalized_doc_number(str(((item.get("identifiers") or {}).get("document_number") or "")))
-                if current == identity:
+                identifiers = item.get("identifiers") or {}
+                current_values = [
+                    _normalized_doc_number(str(identifiers.get("document_number") or "")),
+                    _normalized_doc_number(str(identifiers.get("nif_nie") or "")),
+                    _normalized_doc_number(str(identifiers.get("passport") or "")),
+                ]
+                if any(v and v in keys for v in current_values):
                     return item
             return None
 
@@ -304,10 +328,32 @@ class CRMRepository:
                 continue
             if exclude and str(doc.get("document_id") or "") == exclude:
                 continue
-            current = _normalized_doc_number(str(((doc.get("identifiers") or {}).get("document_number") or "")))
-            if current == identity:
+            identifiers = doc.get("identifiers") or {}
+            current_values = [
+                _normalized_doc_number(str(identifiers.get("document_number") or "")),
+                _normalized_doc_number(str(identifiers.get("nif_nie") or "")),
+                _normalized_doc_number(str(identifiers.get("passport") or "")),
+            ]
+            if any(v and v in keys for v in current_values):
                 records.append(doc)
         if not records:
             return None
         records.sort(key=lambda d: str(d.get("updated_at") or ""), reverse=True)
         return records[0]
+
+    def delete_document(self, document_id: str) -> bool:
+        doc_id = str(document_id or "").strip()
+        if not doc_id:
+            return False
+        if self._mongo_enabled and self._collection is not None:
+            result = self._collection.delete_one({"document_id": doc_id})
+            return bool(result.deleted_count)
+        path = self._fallback_path(doc_id)
+        if not path.exists():
+            return False
+        try:
+            path.unlink()
+            return True
+        except Exception:
+            LOGGER.exception("Failed deleting fallback CRM record: %s", path)
+            return False

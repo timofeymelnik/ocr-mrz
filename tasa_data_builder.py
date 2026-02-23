@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
+from functools import lru_cache
+from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any
 
@@ -47,8 +50,16 @@ ADDRESS_ABBREVIATIONS = {
     "CMNO": "Camino",
     "TR": "Travesia",
     "TRV": "Travesia",
+    "URB": "Urbanizacion",
     "PJE": "Pasaje",
     "PJ": "Pasaje",
+    "GL": "Glorieta",
+    "GTA": "Glorieta",
+    "POL": "Poligono",
+    "PG": "Poligono",
+    "RDA": "Ronda",
+    "BARR": "Barrio",
+    "BAR": "Barrio",
     "PB": "Planta Baja",
     "PBJ": "Planta Baja",
     "BJ": "Bajo",
@@ -70,7 +81,62 @@ TIPO_VIA_CANONICAL = {
     "CARRETERA",
     "CAMINO",
     "TRAVESIA",
+    "URBANIZACION",
+    "GLORIETA",
+    "RONDA",
+    "POLIGONO",
+    "BARRIO",
+    "AUTOPISTA",
+    "AUTOVIA",
+    "CUESTA",
+    "RAMBLA",
+    "SENDA",
+    "VEREDA",
 }
+
+
+def _norm_tipo_token(value: str) -> str:
+    v = (value or "").upper()
+    v = re.sub(r"[ÁÀÂÄ]", "A", v)
+    v = re.sub(r"[ÉÈÊË]", "E", v)
+    v = re.sub(r"[ÍÌÎÏ]", "I", v)
+    v = re.sub(r"[ÓÒÔÖ]", "O", v)
+    v = re.sub(r"[ÚÙÛÜ]", "U", v)
+    v = v.replace("Ñ", "N")
+    v = re.sub(r"[^A-Z0-9]+", "", v)
+    return v
+
+
+TIPO_VIA_CANONICAL_NORM = {_norm_tipo_token(x) for x in TIPO_VIA_CANONICAL}
+
+
+@lru_cache(maxsize=1)
+def _postal_tipo_via_aliases() -> dict[str, str]:
+    """
+    Optional extension point for postal catalogs.
+    Expected JSON formats:
+    1) {"URB": "URBANIZACION", "CT": "CARRETERA"}
+    2) {"aliases": {"URB": "URBANIZACION", ...}}
+    """
+    default_path = Path("runtime/catalogs/postal_street_types_es.json")
+    configured = os.getenv("POSTAL_STREET_TYPE_DICT_PATH", "").strip()
+    path = Path(configured) if configured else default_path
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    src = raw.get("aliases") if isinstance(raw, dict) and isinstance(raw.get("aliases"), dict) else raw
+    if not isinstance(src, dict):
+        return {}
+    out: dict[str, str] = {}
+    for alias, canonical in src.items():
+        a = _norm_tipo_token(str(alias))
+        c = _norm_tipo_token(str(canonical))
+        if a and c:
+            out[a] = c
+    return out
 
 MONTHS_ES = {
     "enero": "01",
@@ -105,6 +171,86 @@ def _clean_spaces(value: str) -> str:
 
 def _upper_compact(value: str) -> str:
     return re.sub(r"\s+", "", (value or "")).upper()
+
+
+def _contains_cyrillic(value: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", value or ""))
+
+
+_RU_TO_LAT = {
+    "А": "A",
+    "Б": "B",
+    "В": "V",
+    "Г": "G",
+    "Д": "D",
+    "Е": "E",
+    "Ё": "E",
+    "Ж": "ZH",
+    "З": "Z",
+    "И": "I",
+    "Й": "I",
+    "К": "K",
+    "Л": "L",
+    "М": "M",
+    "Н": "N",
+    "О": "O",
+    "П": "P",
+    "Р": "R",
+    "С": "S",
+    "Т": "T",
+    "У": "U",
+    "Ф": "F",
+    "Х": "KH",
+    "Ц": "TS",
+    "Ч": "CH",
+    "Ш": "SH",
+    "Щ": "SHCH",
+    "Ъ": "",
+    "Ы": "Y",
+    "Ь": "",
+    "Э": "E",
+    "Ю": "YU",
+    "Я": "YA",
+}
+
+
+def _transliterate_ru(value: str) -> str:
+    raw = str(value or "")
+    if not raw:
+        return ""
+    out: list[str] = []
+    for ch in raw:
+        up = ch.upper()
+        if up in _RU_TO_LAT:
+            repl = _RU_TO_LAT[up]
+            if ch.islower():
+                repl = repl.lower()
+            out.append(repl)
+        else:
+            out.append(ch)
+    return _clean_spaces("".join(out))
+
+
+def _cleanup_nameish(value: str) -> str:
+    v = _clean_spaces(str(value or ""))
+    if not v:
+        return ""
+    v = re.sub(r"\s*/\s*$", "", v)
+    v = re.sub(r"^\s*/\s*", "", v)
+    return _clean_spaces(v)
+
+
+def _normalize_sex_code(value: str) -> str:
+    v = _upper_compact(value)
+    if not v:
+        return ""
+    if v in {"H", "M", "X"}:
+        return v
+    if v in {"F", "FEMALE", "WOMAN", "MUJER"}:
+        return "M"
+    if v in {"MALE", "MAN", "HOMBRE"}:
+        return "H"
+    return ""
 
 
 def _normalize_puerta(value: str) -> str:
@@ -233,7 +379,7 @@ def _extract_labeled_value(lines: list[str], labels: list[str]) -> str:
 
 def _extract_passport_candidate(lines: list[str], text: str) -> str:
     marker_re = re.compile(r"PASAPORTE|PASSPORT|N[ºO°]?\s*DOCUMENTO|DOCUMENT NUMBER|OTRO DOCUMENTO", re.I)
-    number_re = re.compile(r"\b[A-Z]{0,2}\s*\d{6,9}\b")
+    number_re = re.compile(r"\b(?:[A-Z]{0,2}\s*\d{6,9}|\d{2}\s+\d{7})\b")
     stop_re = re.compile(r"VISADO|VISA|DATOS DEL VIAJE|PAIS PROCEDENCIA|N[°ºO] VUELO|HORA", re.I)
 
     for i, line in enumerate(lines):
@@ -299,9 +445,29 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
 
     dob_raw = _extract_labeled_value(lines, ["FECHA\\s+NAC", "FECHA\\s+DE\\s+NACIMIENTO", "BIRTH\\s+DATE", "DOB"])
     dob = _to_spanish_date(dob_raw)
+    if not dob:
+        dob_guess, _ = _extract_birth_nationality(text)
+        dob = _to_spanish_date(dob_guess)
     nat = _extract_labeled_value(lines, ["NACIONALIDAD", "NATIONALITY"])
+    if not nat or not re.fullmatch(r"[A-Za-z]{3}", _clean_spaces(nat)):
+        _, nat_guess = _extract_birth_nationality(text)
+        nat = nat or nat_guess
     if re.fullmatch(r"[A-Za-z]{3}", nat):
         nat = nat.upper()
+    sexo_raw = _extract_labeled_value(lines, ["SEXO", "SEX"])
+    sexo = ""
+    compact_sex = _upper_compact(sexo_raw)
+    if compact_sex in {"M", "F", "X"}:
+        sexo = compact_sex
+    if not sexo:
+        sex_match = re.search(r"\b(?:X/)?([MFX])\b", all_text_up)
+        if sex_match:
+            sexo = sex_match.group(1)
+    if not sexo:
+        mrz_sex_match = re.search(r"[A-Z0-9<]{10}[A-Z]{3}\d{6}[0-9<]([MFX])\d{6}", all_text_up)
+        if mrz_sex_match:
+            sexo = mrz_sex_match.group(1)
+    sexo = _normalize_sex_code(sexo)
     father_name = _extract_labeled_value(lines, ["PADRE", "DAD", "FATHER", "NOMBRE\\s+DEL\\s+PADRE"])
     mother_name = _extract_labeled_value(lines, ["MADRE", "MOTHER", "NOMBRE\\s+DE\\s+LA\\s+MADRE"])
     if not father_name and not mother_name:
@@ -328,10 +494,32 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
                 else:
                     father_name = father_name or _clean_spaces(cleaned)
                 break
-    place_of_birth = _extract_labeled_value(lines, ["LUGAR\\s+DE\\s+NACIMIENTO", "CITY\\s+OF\\s+BIRTH", "PLACE\\s+OF\\s+BIRTH"])
+    place_of_birth = _extract_labeled_value(
+        lines,
+        ["LUGAR\\s+DE\\s+NACIMIENTO", "CITY\\s+OF\\s+BIRTH", "PLACE\\s+OF\\s+BIRTH", "МЕСТО\\s+РОЖДЕНИЯ"],
+    )
+    if place_of_birth and re.fullmatch(r"(?:X/)?[MFX]", _upper_compact(place_of_birth)):
+        place_of_birth = ""
     if not place_of_birth:
         country_birth = _extract_labeled_value(lines, ["PAIS\\s+NACIMIENTO", "COUNTRY\\s+OF\\s+BIRTH"])
         place_of_birth = country_birth
+    if not place_of_birth:
+        for i, raw in enumerate(lines):
+            up = raw.upper()
+            if not ("PLACE OF BIRTH" in up or "LUGAR DE NACIMIENTO" in up or "МЕСТО РОЖДЕНИЯ" in up):
+                continue
+            for j in range(i + 1, min(i + 6, len(lines))):
+                cand = _clean_spaces(lines[j])
+                if not cand:
+                    continue
+                if _is_labelish_fragment(cand):
+                    continue
+                if re.fullmatch(r"(?:X/)?[MFX]", _upper_compact(cand)):
+                    continue
+                place_of_birth = cand
+                break
+            if place_of_birth:
+                break
     father_name = re.sub(r"^(?:/)?(?:PADRE|DAD|FATHER)\s*[:\-]?\s*", "", _clean_spaces(father_name), flags=re.I)
     mother_name = re.sub(r"^(?:/)?(?:MADRE|MOTHER)\s*[:\-]?\s*", "", _clean_spaces(mother_name), flags=re.I)
     place_of_birth = re.sub(
@@ -405,6 +593,36 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
     iban = _extract_labeled_value(lines, ["IBAN", "C[ÓO]DIGO\\s+IBAN"])
     iban = re.sub(r"\s+", "", iban).upper()
     pasaporte = _extract_passport_candidate(lines, text)
+    if pasaporte and numero and numero == _upper_compact(pasaporte) and not domicilio:
+        numero = ""
+
+    is_rf_passport = (
+        "P<RUS" in all_text_up
+        or "RUSSIAN FEDERATION" in all_text_up
+        or "РОССИЙСКАЯ ФЕДЕРАЦИЯ" in all_text_up
+        or _upper_compact(nat) == "RUS"
+    )
+
+    apellidos = _cleanup_nameish(apellidos)
+    nombre = _cleanup_nameish(nombre)
+    full_name = _cleanup_nameish(full_name)
+    place_of_birth = _cleanup_nameish(place_of_birth)
+    father_name = _cleanup_nameish(father_name)
+    mother_name = _cleanup_nameish(mother_name)
+
+    if is_rf_passport:
+        if _contains_cyrillic(apellidos):
+            apellidos = _transliterate_ru(apellidos).upper()
+        if _contains_cyrillic(nombre):
+            nombre = _transliterate_ru(nombre).upper()
+        if _contains_cyrillic(full_name):
+            full_name = _transliterate_ru(full_name).upper()
+        if _contains_cyrillic(place_of_birth):
+            place_of_birth = _transliterate_ru(place_of_birth).upper()
+        if _contains_cyrillic(father_name):
+            father_name = _transliterate_ru(father_name).upper()
+        if _contains_cyrillic(mother_name):
+            mother_name = _transliterate_ru(mother_name).upper()
 
     return {
         "nif_nie": _upper_compact(nif_nie),
@@ -413,6 +631,7 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         "full_name": full_name,
         "fecha_nacimiento": dob,
         "nacionalidad": nat,
+        "sexo": sexo,
         "lugar_nacimiento": place_of_birth,
         "nombre_padre": father_name,
         "nombre_madre": mother_name,
@@ -445,9 +664,40 @@ def _find_mrz_candidates(text: str) -> list[str]:
 
 def _extract_from_mrz_candidates(candidates: list[str]) -> tuple[str, str, str, str]:
     """
-    Lightweight MRZ fallback for TD1-like blocks (3 lines ~30 chars).
+    Lightweight MRZ fallback for TD1/TD3 blocks.
     Extracts surname, name, birth date and nationality even if document number is non-standard.
     """
+    # TD3 passport-like blocks: 2 lines ~44 chars
+    for i in range(len(candidates) - 1):
+        block2 = [candidates[i], candidates[i + 1]]
+        if not (25 <= len(block2[0]) <= 46 and 35 <= len(block2[1]) <= 46):
+            continue
+        if not block2[0].startswith("P<"):
+            continue
+        l1, l2 = [x.ljust(44, "<")[:44] for x in block2]
+        nat = re.sub(r"[^A-Z]", "", l2[10:13])
+        dob_raw = l2[13:19]
+        dob = ""
+        if re.fullmatch(r"\d{6}", dob_raw):
+            yy = int(dob_raw[:2])
+            year = 1900 + yy if yy > 30 else 2000 + yy
+            dob = normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+
+        surname = ""
+        name = ""
+        if "<<" in l1[5:]:
+            parts = l1[5:].split("<<", 1)
+            surname = re.sub(r"<+", " ", parts[0]).strip().title()
+            name = re.sub(r"<+", " ", parts[1]).strip().title()
+        else:
+            tokens = [t for t in re.sub(r"<+", " ", l1[5:]).split() if t]
+            if len(tokens) >= 2:
+                surname = " ".join(tokens[:-1]).title()
+                name = tokens[-1].title()
+        if surname or name or dob or nat:
+            return surname, name, dob, nat
+
+    # TD1 ID-card-like blocks: 3 lines ~30 chars
     for i in range(len(candidates) - 2):
         block = [candidates[i], candidates[i + 1], candidates[i + 2]]
         if not all(28 <= len(x) <= 32 for x in block):
@@ -642,7 +892,7 @@ def _extract_birth_nationality(text: str) -> tuple[str, str]:
     for i, line in enumerate(upper_lines):
         if any(k in line for k in ["FECHA NAC", "BIRTH DATE", "DOB"]):
             window = " ".join(upper_lines[i : i + 3])
-            m = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4}|\d{2}\s+\d{2}\s+\d{4}|\d{8})", window)
+            m = re.search(r"(\d{2}[./-]\d{2}[./-]\d{4}|\d{2}\s+\d{2}\s+\d{4}|\d{8})", window)
             if m:
                 dob = normalize_date(re.sub(r"[^0-9]", "", m.group(1))) or ""
         if "NACIONALIDAD" in line or "NATIONALITY" in line:
@@ -656,7 +906,7 @@ def _extract_birth_nationality(text: str) -> tuple[str, str]:
 
     if not dob:
         all_dates = []
-        for raw in re.findall(r"\b\d{2}[/-]\d{2}[/-]\d{4}\b|\b\d{2}\s+\d{2}\s+\d{4}\b|\b\d{8}\b", text):
+        for raw in re.findall(r"\b\d{2}[./-]\d{2}[./-]\d{4}\b|\b\d{2}\s+\d{2}\s+\d{4}\b|\b\d{8}\b", text):
             nd = normalize_date(re.sub(r"[^0-9]", "", raw))
             if nd:
                 all_dates.append(nd)
@@ -670,10 +920,21 @@ def _extract_from_form_pdf_tokens(text: str) -> dict[str, str]:
     tokens = _extract_keyed_tokens(text)
     if not any(k.startswith("DEX_") for k in tokens):
         return {}
-    sexo = _extract_checkbox_token_value(text, "DEX_SEXO", {"H", "M", "X"})
+    sexo = _normalize_sex_code(_extract_checkbox_token_value(text, "DEX_SEXO", {"H", "M", "X"}))
     estado_civil = _extract_checkbox_token_value(text, "DEX_EC", {"S", "C", "V", "D", "SP", "UH"})
+    dex_nie_compact = _upper_compact(
+        "".join(
+            [
+                tokens.get("DEX_NIE1", ""),
+                tokens.get("DEX_NIE_2", ""),
+                tokens.get("DEX_NIE_3", ""),
+            ]
+        )
+    )
+    dex_nie_single = _upper_compact(tokens.get("DEX_NIE_2", ""))
+    dex_nie = dex_nie_compact or dex_nie_single
     return {
-        "nie_or_nif": tokens.get("DEX_NIE_2", "") or tokens.get("DR_DNI", ""),
+        "nie_or_nif": dex_nie or tokens.get("DR_DNI", ""),
         "apellidos": tokens.get("DEX_APE1", ""),
         "nombre": tokens.get("DEX_NOMBRE", ""),
         "fecha_nacimiento": _to_spanish_date(
@@ -729,7 +990,10 @@ def _detect_form_kind(merged_upper: str, form_pdf: dict[str, str], tasa_code: st
 def _address_candidate_lines(text: str) -> list[str]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     out: list[str] = []
-    road_hint = re.compile(r"\b(C/|C\.|C\b|CALLE|AVDA|AVENIDA|PZ|PLAZA|PSO|PASEO|CTRA|CARRETERA|CMNO|TRV)\b", re.I)
+    road_hint = re.compile(
+        r"\b(C/|C\.|C\b|CALLE|AVDA|AVENIDA|PZ|PLAZA|PSO|PASEO|CTRA|CARRETERA|CMNO|TRV|URB|URBANIZACI[OÓ]N|RDA|GTA|GLORIETA|POL[IÍ]GONO)\b",
+        re.I,
+    )
 
     def _is_noise(line: str) -> bool:
         up = line.upper()
@@ -805,14 +1069,24 @@ def _parse_address_parts(address: str, overrides: dict[str, Any]) -> dict[str, s
     type_match = re.match(r"^\s*([A-ZÁÉÍÓÚÑÜ]+)\b", up)
     if type_match and not fields["tipo_via"]:
         token = type_match.group(1)
-        if token in TIPO_VIA_CANONICAL:
-            fields["tipo_via"] = token.title()
+        token_norm = _norm_tipo_token(token)
+        alias_map = _postal_tipo_via_aliases()
+        canonical_norm = alias_map.get(token_norm) or token_norm
+        if canonical_norm in TIPO_VIA_CANONICAL_NORM:
+            pretty = next((x for x in TIPO_VIA_CANONICAL if _norm_tipo_token(x) == canonical_norm), canonical_norm)
+            fields["tipo_via"] = pretty.title()
 
     if fields["tipo_via"] and not fields["nombre_via_publica"]:
-        # Allow punctuation after tipo via (e.g. "CALLE. PORTUGAL")
-        m = re.search(re.escape(fields["tipo_via"].upper()) + r"[.\s]+([^,\d]+)", up)
-        if m:
-            fields["nombre_via_publica"] = _clean_spaces(m.group(1)).title()
+        # Allow punctuation after tipo via (e.g. "CALLE. PORTUGAL").
+        # Try canonical token and original token (for alias-mapped prefixes like RBLA -> RAMBLA).
+        candidates = [fields["tipo_via"].upper()]
+        if type_match:
+            candidates.append(type_match.group(1))
+        for token in candidates:
+            m = re.search(re.escape(token) + r"[.\s]+([^,\d]+)", up)
+            if m:
+                fields["nombre_via_publica"] = _clean_spaces(m.group(1)).title()
+                break
 
     if not fields["numero"]:
         m = re.search(r"\b(\d{1,5}[A-Z]?)\b", up)
@@ -982,10 +1256,14 @@ def build_tasa_document(
     google_maps_api_key: str | None = None,
     tasa_code: str = "790_012",
     source_file: str = "",
+    source_kind: str = "anketa",
 ) -> dict[str, Any]:
     overrides = user_overrides or {}
     merged = "\n".join(x for x in [ocr_front, ocr_back] if x).strip()
     merged_upper = merged.upper()
+    source_kind_norm = _safe(source_kind).lower() or "anketa"
+    is_form_source = source_kind_norm in {"anketa", "form", "formulario", "questionnaire"}
+    is_identity_source = source_kind_norm in {"passport", "nie_tie", "visa"}
     form_pdf = _extract_from_form_pdf_tokens(merged)
     visual_fields = _extract_visual_fields(merged)
     mrz_candidates = _find_mrz_candidates(merged)
@@ -1002,8 +1280,6 @@ def build_tasa_document(
     passport_number = _upper_compact(
         _safe(overrides.get("pasaporte")) or _safe(form_pdf.get("pasaporte")) or _safe(visual_fields.get("pasaporte"))
     )
-    if not nie_or_nif and passport_number:
-        nie_or_nif = passport_number
     nie_or_nif = _upper_compact(nie_or_nif)
     if nie_or_nif and not validate_spanish_document_number(nie_or_nif):
         # For non NIE/NIF flows (e.g. passport-based forms), keep the value as generic identity document.
@@ -1034,11 +1310,22 @@ def build_tasa_document(
         apellidos = _clean_spaces(_safe(visual_fields.get("apellidos")))
     if (not nombre or _looks_like_name_noise(nombre)) and _safe(visual_fields.get("nombre")):
         nombre = _clean_spaces(_safe(visual_fields.get("nombre")))
+    mrz_identity_present = bool(
+        (mrz and (mrz.surname or mrz.name or mrz.date_of_birth or mrz.nationality))
+        or mrz_surname
+        or mrz_name
+        or mrz_dob
+        or mrz_nat
+    )
     if form_pdf:
-        apellidos = _clean_spaces(_safe(overrides.get("apellidos")) or form_pdf.get("apellidos") or apellidos)
-        nombre = _clean_spaces(_safe(overrides.get("nombre")) or form_pdf.get("nombre") or nombre)
-        fecha_nacimiento = _safe(overrides.get("fecha_nacimiento")) or form_pdf.get("fecha_nacimiento") or fecha_nacimiento
-        nacionalidad = _safe(overrides.get("nacionalidad")) or form_pdf.get("nacionalidad") or nacionalidad
+        if not apellidos or not mrz_identity_present:
+            apellidos = _clean_spaces(_safe(overrides.get("apellidos")) or form_pdf.get("apellidos") or apellidos)
+        if not nombre or not mrz_identity_present:
+            nombre = _clean_spaces(_safe(overrides.get("nombre")) or form_pdf.get("nombre") or nombre)
+        if not fecha_nacimiento or not mrz_identity_present:
+            fecha_nacimiento = _safe(overrides.get("fecha_nacimiento")) or form_pdf.get("fecha_nacimiento") or fecha_nacimiento
+        if not nacionalidad or not mrz_identity_present:
+            nacionalidad = _safe(overrides.get("nacionalidad")) or form_pdf.get("nacionalidad") or nacionalidad
 
     if not fecha_nacimiento:
         fecha_nacimiento = _safe(visual_fields.get("fecha_nacimiento"))
@@ -1052,6 +1339,14 @@ def build_tasa_document(
     )
     nombre_padre = _safe(overrides.get("nombre_padre")) or _safe(form_pdf.get("nombre_padre")) or _safe(visual_fields.get("nombre_padre"))
     nombre_madre = _safe(overrides.get("nombre_madre")) or _safe(form_pdf.get("nombre_madre")) or _safe(visual_fields.get("nombre_madre"))
+    documento_tipo = _safe(overrides.get("documento_tipo")).lower()
+    if documento_tipo not in {"pasaporte", "nif_tie_nie_dni"}:
+        if source_kind_norm in {"passport", "visa"}:
+            documento_tipo = "pasaporte"
+        elif source_kind_norm == "nie_tie":
+            documento_tipo = "nif_tie_nie_dni"
+        else:
+            documento_tipo = "nif_tie_nie_dni" if validate_spanish_document_number(nie_or_nif) else "pasaporte"
 
     visual_full_name = _clean_spaces(_safe(visual_fields.get("full_name")))
     if _looks_like_name_noise(visual_full_name) or _is_labelish_fragment(visual_full_name):
@@ -1060,7 +1355,7 @@ def build_tasa_document(
         _safe(overrides.get("full_name")) or f"{apellidos} {nombre}".strip() or visual_full_name
     )
 
-    address_lines = _address_candidate_lines(merged)
+    address_lines = _address_candidate_lines(merged) if is_form_source else []
     if visual_fields.get("domicilio"):
         if visual_fields["domicilio"] not in address_lines:
             address_lines = [visual_fields["domicilio"], *address_lines]
@@ -1139,6 +1434,7 @@ def build_tasa_document(
 
     fields_790 = {
         "nif_nie": _safe(overrides.get("nif_nie")) or nie_or_nif,
+        "pasaporte": _safe(overrides.get("pasaporte")) or passport_number,
         "apellidos_nombre_razon_social": _safe(overrides.get("apellidos_nombre_razon_social")) or full_name,
         "tipo_via": _safe(address_parts.get("tipo_via")),
         "nombre_via_publica": _safe(address_parts.get("nombre_via_publica")),
@@ -1182,7 +1478,9 @@ def build_tasa_document(
         "full_name": full_name,
         "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
-        "sexo": _safe(overrides.get("sexo")) or _safe(form_pdf.get("sexo")) or _safe(visual_fields.get("sexo")),
+        "sexo": _normalize_sex_code(
+            _safe(overrides.get("sexo")) or _safe(form_pdf.get("sexo")) or _safe(visual_fields.get("sexo"))
+        ),
         "estado_civil": _safe(overrides.get("estado_civil"))
         or _safe(form_pdf.get("estado_civil"))
         or _safe(visual_fields.get("estado_civil")),
@@ -1216,6 +1514,9 @@ def build_tasa_document(
     }
 
     form_kind = _detect_form_kind(merged_upper, form_pdf, tasa_code)
+    if is_identity_source and form_kind == "790_012":
+        # Uploaded source is an identity document (not a form), keep extraction but avoid forcing form-specific strategy.
+        form_kind = "visual_generic"
     if form_kind == "790_012":
         required_for_form = REQUIRED_FIELDS_790_012
         base_fields = fields_790
@@ -1265,13 +1566,18 @@ def build_tasa_document(
         validation["warnings"].append("Visual OCR mode: low-confidence handwritten extraction.")
 
     card_extracted = {
+        "documento_tipo": documento_tipo,
+        "source_kind": source_kind_norm,
         "nie_or_nif": nie_or_nif,
+        "pasaporte": _safe(overrides.get("pasaporte")) or passport_number,
         "apellidos": apellidos,
         "nombre": nombre,
         "full_name": full_name,
         "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
-        "sexo": _safe(overrides.get("sexo")) or _safe(form_pdf.get("sexo")) or _safe(visual_fields.get("sexo")),
+        "sexo": _normalize_sex_code(
+            _safe(overrides.get("sexo")) or _safe(form_pdf.get("sexo")) or _safe(visual_fields.get("sexo"))
+        ),
         "estado_civil": _safe(overrides.get("estado_civil"))
         or _safe(form_pdf.get("estado_civil"))
         or _safe(visual_fields.get("estado_civil")),
@@ -1324,10 +1630,11 @@ def build_tasa_document(
     return {
         "_id": {"$oid": uuid.uuid4().hex[:24]},
         "schema_version": "1.2.0",
-        "document_type": "nie_tie_tasa_payload",
+        "document_type": "nie_tie_tasa_payload" if source_kind_norm != "visa" else "visa_tasa_payload",
         "tasa_code": tasa_code,
         "source": {
             "source_file": source_file,
+            "source_kind": source_kind_norm,
             "ocr_front": ocr_front,
             "ocr_back": ocr_back,
             "user_overrides": overrides,

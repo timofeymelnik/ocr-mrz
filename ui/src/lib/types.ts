@@ -2,6 +2,7 @@ export type Payload = {
   identificacion: {
     nif_nie: string;
     pasaporte?: string;
+    documento_tipo?: "pasaporte" | "nif_tie_nie_dni";
     nombre_apellidos: string;
     primer_apellido?: string;
     segundo_apellido?: string;
@@ -90,26 +91,10 @@ export type UploadResponse = {
 export type AutofillPreviewResponse = {
   document_id: string;
   form_url: string;
-  mode?: string;
-  warnings?: string[];
-  filled_fields?: string[];
-  filled_pdf_url?: string;
-  applied_mappings?: Array<{
-    selector: string;
-    canonical_key: string;
-    field_kind?: "text" | "select" | "checkbox" | "radio";
-    match_value?: string;
-    checked_when?: string;
-    source?: string;
-    confidence?: number;
-    reason?: string;
-  }>;
-  missing_fields: string[];
-  validation_issues?: Array<{ code: string; field: string; message: string }>;
-  manual_steps_required: string[];
-  screenshot_url: string;
-  dom_snapshot_url: string;
+  status?: string;
   error_code?: "TEMPLATE_NOT_FOUND" | "TEMPLATE_INVALID" | "FILL_PARTIAL" | "FILL_FAILED";
+  message?: string;
+  filled_pdf_url?: string;
 };
 
 export type EnrichByIdentityResponse = {

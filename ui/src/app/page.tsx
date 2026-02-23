@@ -9,17 +9,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
 import type {
-  AutofillValidationResponse,
   AutofillPreviewResponse,
-  EnrichByIdentityResponse,
   Payload,
   SavedCrmDocument,
   UploadResponse,
 } from "@/lib/types";
 
 type Step = "upload" | "review" | "prepare" | "autofill";
+type UploadSourceKind = "anketa" | "passport" | "nie_tie" | "visa";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
@@ -98,6 +96,26 @@ function composeNie(prefix: string, number: string, suffix: string): string {
   return "";
 }
 
+function parsePhoneParts(value: string): { countryCode: string; localNumber: string } {
+  const raw = (value || "").trim();
+  if (!raw) return { countryCode: "+34", localNumber: "" };
+  const compact = raw.replace(/\s+/g, "");
+  const withPlus = compact.match(/^\+(\d{1,3})(\d*)$/);
+  if (withPlus) {
+    return { countryCode: `+${withPlus[1]}`, localNumber: withPlus[2] || "" };
+  }
+  const digits = compact.replace(/\D/g, "");
+  return { countryCode: "+34", localNumber: digits };
+}
+
+function composePhone(countryCode: string, localNumber: string): string {
+  const ccDigits = (countryCode || "").replace(/\D/g, "").slice(0, 3);
+  const numDigits = (localNumber || "").replace(/\D/g, "").slice(0, 15);
+  if (ccDigits && numDigits) return `+${ccDigits}${numDigits}`;
+  if (numDigits) return numDigits;
+  return "";
+}
+
 async function readErrorResponse(resp: Response): Promise<string> {
   const text = await resp.text();
   if (!text) return `Request failed (${resp.status})`;
@@ -125,13 +143,7 @@ export default function HomePage() {
   const [browserSessionAlive, setBrowserSessionAlive] = useState(false);
   const [browserCurrentUrl, setBrowserCurrentUrl] = useState("");
   const [missingFields, setMissingFields] = useState<string[]>([]);
-  const [manualSteps, setManualSteps] = useState<string[]>([]);
   const [autofill, setAutofill] = useState<AutofillPreviewResponse | null>(null);
-  const [validationReport, setValidationReport] = useState<AutofillValidationResponse | null>(null);
-  const [validationFilter, setValidationFilter] = useState<"errors" | "all">("errors");
-  const [mapperStatus, setMapperStatus] = useState("");
-  const [mapperPdfFile, setMapperPdfFile] = useState<File | null>(null);
-  const [savingMapperFromPage, setSavingMapperFromPage] = useState(false);
   const [niePrefix, setNiePrefix] = useState("");
   const [nieNumber, setNieNumber] = useState("");
   const [nieSuffix, setNieSuffix] = useState("");
@@ -144,16 +156,13 @@ export default function HomePage() {
   const [fechaNacimientoDia, setFechaNacimientoDia] = useState("");
   const [fechaNacimientoMes, setFechaNacimientoMes] = useState("");
   const [fechaNacimientoAnio, setFechaNacimientoAnio] = useState("");
+  const [telefonoCountryCode, setTelefonoCountryCode] = useState("+34");
+  const [telefonoLocalNumber, setTelefonoLocalNumber] = useState("");
   const [savedDocs, setSavedDocs] = useState<SavedCrmDocument[]>([]);
   const [savedDocsFilter, setSavedDocsFilter] = useState("");
   const [loadingSavedDocs, setLoadingSavedDocs] = useState(false);
-  const [identityMatchFound, setIdentityMatchFound] = useState(false);
-  const [identitySourceDocumentId, setIdentitySourceDocumentId] = useState("");
-  const [enrichmentPreview, setEnrichmentPreview] = useState<
-    Array<{ field: string; current_value: string; suggested_value: string; source?: string; reason?: string }>
-  >([]);
-  const [enriching, setEnriching] = useState(false);
-  const [validating, setValidating] = useState(false);
+  const [deletingDocumentId, setDeletingDocumentId] = useState("");
+  const [uploadSourceKind, setUploadSourceKind] = useState<UploadSourceKind>("anketa");
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
 
@@ -178,12 +187,7 @@ export default function HomePage() {
     setBrowserSessionAlive(false);
     setBrowserCurrentUrl("");
     setMissingFields([]);
-    setManualSteps([]);
     setAutofill(null);
-    setValidationReport(null);
-    setMapperStatus("");
-    setMapperPdfFile(null);
-    setSavingMapperFromPage(false);
     setNiePrefix("");
     setNieNumber("");
     setNieSuffix("");
@@ -196,10 +200,9 @@ export default function HomePage() {
     setFechaNacimientoDia("");
     setFechaNacimientoMes("");
     setFechaNacimientoAnio("");
-    setIdentityMatchFound(false);
-    setIdentitySourceDocumentId("");
-    setEnrichmentPreview([]);
-    setValidationFilter("errors");
+    setTelefonoCountryCode("+34");
+    setTelefonoLocalNumber("");
+    setUploadSourceKind("anketa");
     setError("");
     setDragOver(false);
   }
@@ -237,6 +240,8 @@ export default function HomePage() {
       setFechaNacimientoDia("");
       setFechaNacimientoMes("");
       setFechaNacimientoAnio("");
+      setTelefonoCountryCode("+34");
+      setTelefonoLocalNumber("");
       return;
     }
     const ident = nextPayload.identificacion || ({ nif_nie: "", nombre_apellidos: "" } as Payload["identificacion"]);
@@ -256,6 +261,9 @@ export default function HomePage() {
     setFechaNacimientoDia((nextPayload.extra?.fecha_nacimiento_dia || birth.day || "").trim());
     setFechaNacimientoMes((nextPayload.extra?.fecha_nacimiento_mes || birth.month || "").trim());
     setFechaNacimientoAnio((nextPayload.extra?.fecha_nacimiento_anio || birth.year || "").trim());
+    const phone = parsePhoneParts(nextPayload.domicilio?.telefono || "");
+    setTelefonoCountryCode(phone.countryCode || "+34");
+    setTelefonoLocalNumber(phone.localNumber || "");
   }
 
   async function openSavedDocument(documentIdToOpen: string) {
@@ -277,18 +285,35 @@ export default function HomePage() {
       setBrowserSessionAlive(false);
       setBrowserCurrentUrl("");
       setMissingFields(data.missing_fields || []);
-      setManualSteps(data.manual_steps_required || []);
-      setIdentityMatchFound(Boolean(data.identity_match_found));
-      setIdentitySourceDocumentId(data.identity_source_document_id || "");
-      setEnrichmentPreview((data.enrichment_preview || []) as Array<{ field: string; current_value: string; suggested_value: string; source?: string }>);
       setAutofill(null);
-      setValidationReport(null);
-      setMapperStatus("");
       setStep("review");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed opening saved document");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function deleteSavedDocument(documentIdToDelete: string) {
+    const approved = window.confirm("Удалить документ из CRM? Это действие нельзя отменить.");
+    if (!approved) return;
+    setDeletingDocumentId(documentIdToDelete);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/crm/documents/${documentIdToDelete}`, {
+        method: "DELETE",
+      });
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      if (documentId === documentIdToDelete) {
+        resetWorkflow();
+      }
+      await loadSavedDocuments(savedDocsFilter);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed deleting CRM document");
+    } finally {
+      setDeletingDocumentId("");
     }
   }
 
@@ -303,14 +328,6 @@ export default function HomePage() {
     });
   }
 
-  function patchNifNieRaw(value: string) {
-    patchPayload("identificacion", "nif_nie", value.toUpperCase());
-    const nie = parseNieParts(value);
-    setNiePrefix(nie.prefix);
-    setNieNumber(nie.number);
-    setNieSuffix(nie.suffix);
-  }
-
   function patchNiePart(kind: "prefix" | "number" | "suffix", value: string) {
     const nextPrefix = kind === "prefix" ? value : niePrefix;
     const nextNumber = kind === "number" ? value : nieNumber;
@@ -320,6 +337,15 @@ export default function HomePage() {
     if (kind === "suffix") setNieSuffix(value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 1));
     const composed = composeNie(nextPrefix, nextNumber, nextSuffix);
     if (composed) patchPayload("identificacion", "nif_nie", composed);
+  }
+
+  function patchPhonePart(kind: "countryCode" | "localNumber", value: string) {
+    const nextCountry =
+      kind === "countryCode" ? `+${value.replace(/\D/g, "").slice(0, 3)}` : telefonoCountryCode;
+    const nextLocal = kind === "localNumber" ? value.replace(/\D/g, "").slice(0, 15) : telefonoLocalNumber;
+    if (kind === "countryCode") setTelefonoCountryCode(nextCountry);
+    if (kind === "localNumber") setTelefonoLocalNumber(nextLocal);
+    patchPayload("domicilio", "telefono", composePhone(nextCountry, nextLocal));
   }
 
   function patchSplitNameAndCompose(kind: "primer_apellido" | "segundo_apellido" | "nombre", value: string) {
@@ -403,71 +429,6 @@ export default function HomePage() {
     setError("");
   }
 
-  async function saveMapperFromPageVariables() {
-    if (!documentId || !browserSessionId) {
-      setError("Сначала откройте управляемую сессию.");
-      return;
-    }
-    setSavingMapperFromPage(true);
-    setError("");
-    try {
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/mapping/save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ overwrite: true, use_auto_pdf_fallback: true }),
-      });
-      if (!resp.ok) throw new Error(await readErrorResponse(resp));
-      const data = (await resp.json()) as {
-        mappings_count?: number;
-        current_url?: string;
-        unknown_vars?: string[];
-        mapping_source?: string;
-      };
-      const unknown = (data.unknown_vars || []).length
-        ? ` Неизвестные переменные: ${(data.unknown_vars || []).join(", ")}`
-        : "";
-      setMapperStatus(
-        `Mapper сохранен из страницы: mappings=${data.mappings_count || 0}, source=${data.mapping_source || "placeholder"}.${unknown}`,
-      );
-      if (data.current_url) setBrowserCurrentUrl(data.current_url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось сохранить mapper из полей страницы");
-    } finally {
-      setSavingMapperFromPage(false);
-    }
-  }
-
-  async function uploadPdfTemplateMapper() {
-    if (!documentId || !browserSessionId) {
-      setError("Сначала откройте управляемую сессию.");
-      return;
-    }
-    if (!mapperPdfFile) {
-      setError("Выберите PDF шаблон.");
-      return;
-    }
-    setSaving(true);
-    setError("");
-    try {
-      const fd = new FormData();
-      fd.append("file", mapperPdfFile);
-      fd.append("overwrite", "true");
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/mapping/import-template-pdf`, {
-        method: "POST",
-        body: fd,
-      });
-      if (!resp.ok) throw new Error(await readErrorResponse(resp));
-      const data = (await resp.json()) as { mappings_count?: number; current_url?: string; warnings?: string[] };
-      const warn = (data.warnings || []).length ? ` Предупреждения:\n${(data.warnings || []).join("\n")}` : "";
-      setMapperStatus(`PDF-шаблон импортирован. mappings=${data.mappings_count || 0}.${warn}`);
-      if (data.current_url) setBrowserCurrentUrl(data.current_url);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Не удалось импортировать PDF шаблон");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function uploadDocument() {
     if (!file) {
       setError("Выберите файл .jpg/.jpeg/.png/.pdf");
@@ -478,6 +439,7 @@ export default function HomePage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      formData.append("source_kind", uploadSourceKind);
       const resp = await fetch(`${API_BASE}/api/documents/upload`, {
         method: "POST",
         body: formData,
@@ -497,12 +459,6 @@ export default function HomePage() {
       setBrowserSessionAlive(false);
       setBrowserCurrentUrl("");
       setMissingFields(data.missing_fields || []);
-      setManualSteps(data.manual_steps_required || []);
-      setIdentityMatchFound(Boolean(data.identity_match_found));
-      setIdentitySourceDocumentId(data.identity_source_document_id || "");
-      setEnrichmentPreview((data.enrichment_preview || []) as Array<{ field: string; current_value: string; suggested_value: string; source?: string }>);
-      setValidationReport(null);
-      setMapperStatus("");
       setStep("review");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
@@ -526,6 +482,10 @@ export default function HomePage() {
           segundo_apellido: segundoApellido,
           nombre: nombreSolo,
           nombre_apellidos: composeFullName(primerApellido, segundoApellido, nombreSolo),
+        },
+        domicilio: {
+          ...payload.domicilio,
+          telefono: composePhone(telefonoCountryCode, telefonoLocalNumber) || payload.domicilio.telefono,
         },
         declarante: {
           ...payload.declarante,
@@ -558,41 +518,11 @@ export default function HomePage() {
       setPayload(confirmedPayload);
       syncNamePartsFromPayload(confirmedPayload);
       setMissingFields(confirmed.missing_fields || []);
-      setIdentityMatchFound(Boolean(confirmed.identity_match_found));
-      setIdentitySourceDocumentId(confirmed.identity_source_document_id || "");
-      setEnrichmentPreview((confirmed.enrichment_preview || []) as Array<{ field: string; current_value: string; suggested_value: string; source?: string }>);
       setStep("prepare");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Confirm failed");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function applyIdentityEnrichment() {
-    if (!documentId) return;
-    setEnriching(true);
-    setError("");
-    try {
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/enrich-by-identity`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apply: true }),
-      });
-      if (!resp.ok) {
-        throw new Error(await readErrorResponse(resp));
-      }
-      const data = (await resp.json()) as EnrichByIdentityResponse;
-      setPayload(data.payload);
-      syncNamePartsFromPayload(data.payload);
-      setMissingFields(data.missing_fields || []);
-      setIdentityMatchFound(Boolean(data.identity_match_found));
-      setIdentitySourceDocumentId(data.identity_source_document_id || "");
-      setEnrichmentPreview(data.enrichment_preview || []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Identity enrichment failed");
-    } finally {
-      setEnriching(false);
     }
   }
 
@@ -630,46 +560,6 @@ export default function HomePage() {
     }
   }
 
-  async function refreshManagedSessionState() {
-    if (!documentId || !browserSessionId) return;
-    setSaving(true);
-    setError("");
-    try {
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/state`);
-      if (!resp.ok) {
-        throw new Error(await readErrorResponse(resp));
-      }
-      const data = await resp.json();
-      setBrowserSessionAlive(Boolean(data.alive));
-      setBrowserCurrentUrl(data.current_url || "");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to refresh browser session state");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function closeManagedSession() {
-    if (!documentId) return;
-    setSaving(true);
-    setError("");
-    try {
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/close`, {
-        method: "POST",
-      });
-      if (!resp.ok) {
-        throw new Error(await readErrorResponse(resp));
-      }
-      setBrowserSessionId("");
-      setBrowserSessionAlive(false);
-      setBrowserCurrentUrl("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to close browser session");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function runAutofillFromManagedSession() {
     if (!payload || !documentId) return;
     if (!browserSessionId) {
@@ -694,49 +584,14 @@ export default function HomePage() {
       const autoData: AutofillPreviewResponse = await autoResp.json();
       setAutofill({
         ...autoData,
-        screenshot_url: toUrl(autoData.screenshot_url),
-        dom_snapshot_url: toUrl(autoData.dom_snapshot_url),
         filled_pdf_url: autoData.filled_pdf_url ? toUrl(autoData.filled_pdf_url) : "",
       });
-      setValidationReport(null);
       setFormUrl(autoData.form_url || targetUrl || formUrl);
-      setManualSteps(autoData.manual_steps_required || []);
-      setMissingFields(autoData.missing_fields || []);
       setStep("autofill");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Autofill in opened browser session failed");
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function validateFilledPdf() {
-    if (!documentId) return;
-    if (!autofill?.filled_pdf_url) {
-      setError("Сначала выполните заполнение, чтобы получить filled PDF.");
-      return;
-    }
-    setValidating(true);
-    setError("");
-    try {
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/autofill-validate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filled_pdf_url: autofill.filled_pdf_url }),
-      });
-      if (!resp.ok) {
-        throw new Error(await readErrorResponse(resp));
-      }
-      const data = (await resp.json()) as AutofillValidationResponse;
-      if (data.filled_pdf_url) {
-        data.filled_pdf_url = toUrl(data.filled_pdf_url);
-      }
-      setValidationReport(data);
-      setValidationFilter("errors");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Validation failed");
-    } finally {
-      setValidating(false);
     }
   }
 
@@ -798,6 +653,19 @@ export default function HomePage() {
                 />
                 {file ? <p className="mt-3 text-sm font-medium">{file.name}</p> : null}
               </div>
+              <div className="space-y-2">
+                <Label>Источник данных</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={uploadSourceKind}
+                  onChange={(e) => setUploadSourceKind(e.target.value as UploadSourceKind)}
+                >
+                  <option value="anketa">Анкета</option>
+                  <option value="passport">Паспорт</option>
+                  <option value="nie_tie">NIE/TIE/DNI</option>
+                  <option value="visa">Виза</option>
+                </select>
+              </div>
               <Button onClick={uploadDocument} disabled={!file || uploading}>
                 {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Запустить OCR и парсинг
@@ -830,6 +698,15 @@ export default function HomePage() {
                       <Button size="sm" onClick={() => openSavedDocument(item.document_id)} disabled={saving}>
                         Открыть
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => deleteSavedDocument(item.document_id)}
+                        disabled={Boolean(deletingDocumentId) || saving}
+                      >
+                        {deletingDocumentId === item.document_id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                        Удалить
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -854,14 +731,26 @@ export default function HomePage() {
             <CardContent className="space-y-5">
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Identificación</h3>
+                <Label>Tipo документа</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={
+                    payload.identificacion.documento_tipo ||
+                    (payload.identificacion.pasaporte && !payload.identificacion.nif_nie ? "pasaporte" : "nif_tie_nie_dni")
+                  }
+                  onChange={(e) => patchPayload("identificacion", "documento_tipo", e.target.value)}
+                >
+                  <option value="nif_tie_nie_dni">NIF/TIE/NIE/DNI</option>
+                  <option value="pasaporte">Pasaporte</option>
+                </select>
                 <Label>NIE (буква + 7 цифр + буква)</Label>
                 <div className="grid grid-cols-3 gap-2">
                   <Input placeholder="Y" value={niePrefix} onChange={(e) => patchNiePart("prefix", e.target.value)} />
                   <Input placeholder="1234567" value={nieNumber} onChange={(e) => patchNiePart("number", e.target.value)} />
                   <Input placeholder="X" value={nieSuffix} onChange={(e) => patchNiePart("suffix", e.target.value)} />
                 </div>
-                <Label>NIF/NIE (raw, если не NIE)</Label>
-                <Input value={payload.identificacion.nif_nie} onChange={(e) => patchNifNieRaw(e.target.value)} />
+                <Label>NIF/NIE (собирается из составных полей)</Label>
+                <Input readOnly value={composeNie(niePrefix, nieNumber, nieSuffix) || payload.identificacion.nif_nie} />
                 <Label>Pasaporte (опционально)</Label>
                 <Input
                   value={payload.identificacion.pasaporte || ""}
@@ -904,8 +793,31 @@ export default function HomePage() {
                     <Input value={payload.domicilio.numero} onChange={(e) => patchPayload("domicilio", "numero", e.target.value)} />
                   </div>
                   <div>
+                    <Label>Escalera</Label>
+                    <Input value={payload.domicilio.escalera} onChange={(e) => patchPayload("domicilio", "escalera", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Piso</Label>
+                    <Input value={payload.domicilio.piso} onChange={(e) => patchPayload("domicilio", "piso", e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Puerta</Label>
+                    <Input value={payload.domicilio.puerta} onChange={(e) => patchPayload("domicilio", "puerta", e.target.value)} />
+                  </div>
+                  <div>
                     <Label>Teléfono</Label>
-                    <Input value={payload.domicilio.telefono} onChange={(e) => patchPayload("domicilio", "telefono", e.target.value)} />
+                    <div className="grid grid-cols-[110px_1fr] gap-2">
+                      <Input
+                        placeholder="+34"
+                        value={telefonoCountryCode}
+                        onChange={(e) => patchPhonePart("countryCode", e.target.value)}
+                      />
+                      <Input
+                        placeholder="624731544"
+                        value={telefonoLocalNumber}
+                        onChange={(e) => patchPhonePart("localNumber", e.target.value)}
+                      />
+                    </div>
                   </div>
                   <div>
                     <Label>Municipio</Label>
@@ -1062,38 +974,6 @@ export default function HomePage() {
                 </div>
               </section>
 
-              <Separator />
-
-              <section className="space-y-2">
-                <h3 className="text-sm font-semibold">Identity enrichment</h3>
-                <Input
-                  readOnly
-                  value={
-                    identityMatchFound
-                      ? `Найдено совпадение по документу: ${identitySourceDocumentId || "unknown"}`
-                      : "Совпадение по NIF/NIE/DNI не найдено"
-                  }
-                />
-                <Button variant="outline" onClick={applyIdentityEnrichment} disabled={enriching || !documentId}>
-                  {enriching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Применить автодополнение
-                </Button>
-                <Label>Автодополненные поля</Label>
-                <Textarea
-                  readOnly
-                  className="min-h-[110px]"
-                  value={(enrichmentPreview || [])
-                    .map((row) => `${row.field}: '${row.current_value || ""}' -> '${row.suggested_value || ""}' (${row.source || row.reason || "match"})`)
-                    .join("\n")}
-                />
-              </section>
-
-              <Separator />
-
-              <div className="space-y-2">
-                <Label>Validation / missing fields</Label>
-                <Textarea readOnly value={(missingFields || []).join("\n")} className="min-h-[110px]" />
-              </div>
               <Button onClick={confirmData} disabled={saving}>
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
                 Подтвердить данные
@@ -1132,10 +1012,6 @@ export default function HomePage() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label>Текущие missing fields</Label>
-                <Textarea readOnly value={(missingFields || []).join("\n")} className="min-h-[130px]" />
-              </div>
-              <div className="space-y-2">
                 <Label>Ссылка на форму из backend</Label>
                 <Input readOnly value={formUrl} />
               </div>
@@ -1168,46 +1044,9 @@ export default function HomePage() {
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Перейти по адресу (открыть управляемое окно)
               </Button>
-              <Button onClick={refreshManagedSessionState} disabled={saving || !browserSessionId}>
-                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Обновить текущий URL в сессии
-              </Button>
-              <div className="space-y-3 rounded-md border p-3">
-                <div className="text-sm font-medium">Импорт шаблона PDF</div>
-                <div className="text-xs text-muted-foreground">
-                  Если в PDF уже есть плейсхолдеры (`{"{field}"}`), загрузите шаблон и система автоматически создаст связи.
-                </div>
-                <Input
-                  type="file"
-                  accept=".pdf,application/pdf"
-                  onChange={(e) => setMapperPdfFile(e.target.files?.[0] || null)}
-                />
-                <Button variant="outline" onClick={uploadPdfTemplateMapper} disabled={saving || !browserSessionId || !mapperPdfFile}>
-                  Импортировать PDF шаблон
-                </Button>
-              </div>
-
-              <div className="space-y-3 rounded-md border p-3">
-                <div className="text-sm font-medium">Автосохранение маппера из страницы</div>
-                <div className="text-xs text-muted-foreground">
-                  Считывает переменные шаблона из текущих полей страницы/PDF и сохраняет mapper для текущего URL.
-                </div>
-                <Button
-                  variant="outline"
-                  onClick={saveMapperFromPageVariables}
-                  disabled={saving || savingMapperFromPage || !browserSessionId}
-                >
-                  {savingMapperFromPage ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Считать переменные и сохранить mapper
-                </Button>
-                <Textarea readOnly className="min-h-[70px]" value={mapperStatus || "Mapper status: not saved yet."} />
-              </div>
               <Button onClick={runAutofillFromManagedSession} disabled={saving || !browserSessionId}>
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
                 Я готов, запустить заполнение данных
-              </Button>
-              <Button variant="outline" onClick={closeManagedSession} disabled={saving || !browserSessionId}>
-                Закрыть управляемую сессию
               </Button>
               <Button variant="secondary" onClick={resetWorkflow} disabled={saving}>
                 Начать сначала
@@ -1222,27 +1061,9 @@ export default function HomePage() {
           <Card className="h-[calc(100vh-180px)] overflow-auto">
             <CardHeader>
               <CardTitle>Manual Handoff</CardTitle>
-              <CardDescription>
-                {autofill.mode === "pdf_pymupdf"
-                  ? "Сформирован локальный заполненный PDF. Исходная страница PDF в браузере не изменяется."
-                  : "Playwright выполнил автозаполнение полей заявителя. Дальше ручные шаги на форме."}
-              </CardDescription>
+              <CardDescription>Заполнение завершено. Проверьте результат и продолжите вручную.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Required manual steps</Label>
-                <Textarea readOnly value={(manualSteps || []).join("\n")} className="min-h-[90px]" />
-              </div>
-              <div className="space-y-2">
-                <Label>Autofill mode</Label>
-                <Input readOnly value={autofill.mode || "unknown"} />
-              </div>
-              {autofill.warnings?.length ? (
-                <div className="space-y-2">
-                  <Label>Warnings</Label>
-                  <Textarea readOnly value={autofill.warnings.join("\n")} className="min-h-[90px]" />
-                </div>
-              ) : null}
               {autofill.filled_pdf_url ? (
                 <Button asChild variant="outline">
                   <a href={autofill.filled_pdf_url} target="_blank" rel="noreferrer">
@@ -1250,48 +1071,6 @@ export default function HomePage() {
                   </a>
                 </Button>
               ) : null}
-              <Button variant="outline" onClick={validateFilledPdf} disabled={validating || !autofill.filled_pdf_url}>
-                {validating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Проверить заполненный PDF по шаблону
-              </Button>
-              {validationReport ? (
-                <div className="space-y-2 rounded-md border p-3">
-                  <div className="text-sm font-semibold">
-                    Validation: {validationReport.matches ? "OK" : "MISMATCH"} | checked={validationReport.summary.total_checked}
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant={validationFilter === "errors" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setValidationFilter("errors")}
-                    >
-                      Ошибки
-                    </Button>
-                    <Button
-                      variant={validationFilter === "all" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setValidationFilter("all")}
-                    >
-                      Все
-                    </Button>
-                  </div>
-                  <Textarea
-                    readOnly
-                    className="min-h-[160px]"
-                    value={(validationReport.field_report || [])
-                      .filter((row) => (validationFilter === "all" ? true : !row.ok))
-                      .map(
-                        (row) =>
-                          `${row.ok ? "OK" : "ERR"} ${row.selector} => ${row.canonical_key} | expected='${String(row.expected)}' actual='${String(row.actual)}' ${row.reason ? `(${row.reason})` : ""}`,
-                      )
-                      .join("\n")}
-                  />
-                </div>
-              ) : null}
-              <div className="space-y-2">
-                <Label>Fields still missing / verify manually</Label>
-                <Textarea readOnly value={(missingFields || []).join("\n")} className="min-h-[150px]" />
-              </div>
               <Button asChild>
                 <a href={formUrl} target="_blank" rel="noreferrer">
                   Открыть живую форму для Trámite/CAPTCHA/скачивания

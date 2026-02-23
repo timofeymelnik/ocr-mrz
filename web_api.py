@@ -163,6 +163,15 @@ def _normalize_identity(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
 
 
+def _identity_candidates(payload: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for path in ["identificacion.nif_nie", "identificacion.pasaporte"]:
+        v = _normalize_identity(_safe_payload_get(payload, path))
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 def _safe_payload_get(payload: dict[str, Any], path: str) -> str:
     node: Any = payload
     for part in path.split("."):
@@ -187,6 +196,7 @@ def _safe_payload_set(payload: dict[str, Any], path: str, value: str) -> None:
 ENRICHMENT_PATHS: list[str] = [
     "identificacion.nif_nie",
     "identificacion.pasaporte",
+    "identificacion.documento_tipo",
     "identificacion.nombre_apellidos",
     "identificacion.primer_apellido",
     "identificacion.segundo_apellido",
@@ -325,8 +335,8 @@ def create_app() -> FastAPI:
         *,
         persist: bool = True,
     ) -> dict[str, Any]:
-        identity_key = _normalize_identity(_safe_payload_get(payload, "identificacion.nif_nie"))
-        if not identity_key:
+        identity_candidates = _identity_candidates(payload)
+        if not identity_candidates:
             return {
                 "identity_match_found": False,
                 "identity_source_document_id": "",
@@ -337,12 +347,12 @@ def create_app() -> FastAPI:
                 "payload": payload,
             }
 
-        source_record = CRM_REPO.find_latest_by_identity(identity_key, exclude_document_id=document_id)
+        source_record = CRM_REPO.find_latest_by_identities(identity_candidates, exclude_document_id=document_id)
         if not source_record:
             return {
                 "identity_match_found": False,
                 "identity_source_document_id": "",
-                "identity_key": identity_key,
+                "identity_key": identity_candidates[0],
                 "enrichment_preview": [],
                 "applied_fields": [],
                 "skipped_fields": [],
@@ -356,6 +366,8 @@ def create_app() -> FastAPI:
             or {}
         )
         source_document_id = str(source_record.get("document_id") or "")
+        source_candidates = _identity_candidates(source_payload if isinstance(source_payload, dict) else {})
+        identity_key = next((c for c in identity_candidates if c in source_candidates), identity_candidates[0])
         enriched, applied, skipped = _enrich_payload_fill_empty(
             payload=payload,
             source_payload=source_payload if isinstance(source_payload, dict) else {},
@@ -423,70 +435,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/mappers/pdf/inspect")
     async def inspect_pdf_mapper_file(file: UploadFile = File(...)) -> JSONResponse:
-        filename = file.filename or ""
-        if Path(filename).suffix.lower() != ".pdf":
-            raise HTTPException(status_code=400, detail="Only .pdf is supported for mapper draft generation.")
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-        try:
-            fields = inspect_pdf_fields_from_bytes(data)
-            suggestions = suggest_mappings_for_fields(fields, payload={}, mapping_hints={})
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        field_by_selector = {_safe(f.get("selector")): f for f in fields}
-
-        def _signal(*parts: str) -> str:
-            return "".join(_safe(p).lower() for p in parts)
-
-        mappings: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        for item in sorted(suggestions, key=lambda x: float(x.get("confidence") or 0.0), reverse=True):
-            selector = _safe(item.get("selector"))
-            key = _safe(item.get("canonical_key"))
-            conf = float(item.get("confidence") or 0.0)
-            if not selector or not key:
-                continue
-            field = field_by_selector.get(selector) or {}
-            sig = _signal(selector, _safe(field.get("label")), _safe(field.get("name")), _safe(field.get("id")))
-            ftype = _safe(field.get("type")).lower()
-
-            # Strong filters to avoid noisy auto mappings.
-            if conf < 0.75:
-                continue
-            if key == "nif_nie" and not any(t in sig for t in ["nie", "nif", "dninie", "pasaport"]):
-                continue
-            if key == "cp" and not any(t in sig for t in ["cp", "postal"]):
-                continue
-            if key == "nombre_apellidos" and not ("nombre" in sig and "apellido" in sig):
-                continue
-            if key in {"sexo", "estado_civil", "hijos_escolarizacion_espana"} and "check" not in ftype:
-                continue
-            if key in {"nif_nie_prefix", "nif_nie_number", "nif_nie_suffix"} and "text" not in ftype:
-                continue
-            tag = (selector, key)
-            if tag in seen:
-                continue
-            seen.add(tag)
-            mappings.append(
-                {
-                    "selector": selector,
-                    "canonical_key": key,
-                    "field_kind": "text",
-                    "match_value": "",
-                    "checked_when": "",
-                    "source": "pdf_inspect_auto",
-                    "confidence": conf,
-                }
-            )
-        return JSONResponse(
-            {
-                "status": "ok",
-                "fields_count": len(fields),
-                "mappings_count": len(mappings),
-                "mappings": mappings,
-            }
-        )
+        _ = file
+        LOGGER.info("disabled endpoint called: /api/mappers/pdf/inspect")
+        raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
     @app.post("/api/documents/{document_id}/browser-session/mapping/import-template-pdf")
     async def import_pdf_template_mapper(
@@ -494,110 +445,11 @@ def create_app() -> FastAPI:
         file: UploadFile = File(...),
         overwrite: bool = Form(default=False),
     ) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Browser session is not opened. Click 'Перейти по адресу' first.")
-
-        filename = file.filename or ""
-        if Path(filename).suffix.lower() != ".pdf":
-            raise HTTPException(status_code=400, detail="Template mapper source must be a .pdf file.")
-        raw = await file.read()
-        if not raw:
-            raise HTTPException(status_code=400, detail="Uploaded template PDF is empty.")
-
-        try:
-            mappings, unknown_vars = extract_pdf_placeholder_mappings_from_bytes(raw)
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        if not mappings:
-            raise HTTPException(
-                status_code=422,
-                detail="No placeholders found in template PDF. Put values like {nombre}, {cp}, {nif_nie}.",
-            )
-
-        warnings: list[str] = []
-        unique_keys = {
-            "cp",
-            "piso",
-            "provincia",
-            "municipio",
-            "nombre_madre",
-            "nombre_padre",
-            "email",
-            "lugar_nacimiento",
-            "primer_apellido",
-            "segundo_apellido",
-            "nombre",
-            "pais_nacimiento",
-            "nacionalidad",
-            "telefono",
-        }
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for item in mappings:
-            key = _safe(item.get("canonical_key"))
-            if key:
-                grouped.setdefault(key, []).append(item)
-        filtered: list[dict[str, Any]] = []
-        for key, rows in grouped.items():
-            if key not in unique_keys or len(rows) == 1:
-                filtered.extend(rows)
-                continue
-            preferred = sorted(
-                rows,
-                key=lambda r: (
-                    0 if "textfield" not in _safe(r.get("selector")).lower() else 1,
-                    -float(r.get("confidence") or 0.0),
-                    _safe(r.get("selector")),
-                ),
-            )[0]
-            filtered.append(preferred)
-            dropped = [r for r in rows if r is not preferred]
-            warnings.append(
-                f"Canonical key '{key}' had {len(rows)} candidates; kept '{_safe(preferred.get('selector'))}', "
-                f"dropped {len(dropped)}."
-            )
-        mappings = filtered
-
-        try:
-            state = await _run_browser_call(get_browser_session_state, session_id)
-            current_url = _safe(state.get("current_url"))
-            analyzed = await _run_browser_call(inspect_browser_session_fields, session_id, payload={}, mapping_hints={})
-            fields = list(analyzed.get("fields") or [])
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        existing = FORM_MAPPING_REPO.get_latest_for_url(current_url)
-        if existing and not overwrite:
-            raise HTTPException(
-                status_code=409,
-                detail="Mapper already exists for this URL. Use overwrite=true to replace it.",
-            )
-
-        template = FORM_MAPPING_REPO.save_template(
-            target_url=current_url,
-            fields=fields,
-            mappings=mappings,
-            template_pdf_bytes=raw,
-            source="template_pdf",
-        )
-        attach_template_artifacts_to_record(record, template)
-        _write_record(document_id, record)
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "session_id": session_id,
-                "current_url": current_url,
-                "saved": True,
-                "overwrite": bool(overwrite),
-                "mappings_count": len(mappings),
-                "mapping_source": "template_pdf",
-                "unknown_vars": unknown_vars,
-                "warnings": warnings,
-                "template": template,
-            }
-        )
+        _ = document_id
+        _ = file
+        _ = overwrite
+        LOGGER.info("disabled endpoint called: /api/documents/{document_id}/browser-session/mapping/import-template-pdf")
+        raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
     @app.get("/api/crm/documents")
     def list_crm_documents(
@@ -615,10 +467,43 @@ def create_app() -> FastAPI:
         record = _record_from_crm(document_id, crm_doc)
         return JSONResponse(record)
 
+    @app.delete("/api/crm/documents/{document_id}")
+    async def delete_crm_document(document_id: str) -> JSONResponse:
+        crm_doc = CRM_REPO.get_document(document_id)
+        if not crm_doc:
+            raise HTTPException(status_code=404, detail=f"CRM document not found: {document_id}")
+
+        session_id = _safe(crm_doc.get("browser_session_id"))
+        if not session_id:
+            try:
+                local_record = _read_record(document_id)
+                session_id = _safe(local_record.get("browser_session_id"))
+            except HTTPException:
+                session_id = ""
+        if session_id:
+            try:
+                await _run_browser_call(close_browser_session, session_id)
+            except Exception:
+                LOGGER.exception("Failed closing browser session during CRM delete: %s", session_id)
+
+        deleted = CRM_REPO.delete_document(document_id)
+        if not deleted:
+            raise HTTPException(status_code=500, detail=f"Failed deleting CRM document: {document_id}")
+
+        record_path = _record_path(document_id)
+        if record_path.exists():
+            try:
+                record_path.unlink()
+            except Exception:
+                LOGGER.exception("Failed deleting local document record: %s", record_path)
+
+        return JSONResponse({"document_id": document_id, "deleted": True})
+
     @app.post("/api/documents/upload")
     async def upload_document(
         file: UploadFile = File(...),
         tasa_code: str = Form(default="790_012"),
+        source_kind: str = Form(default="anketa"),
     ) -> JSONResponse:
         if not file.filename or not _allowed_suffix(file.filename):
             raise HTTPException(status_code=400, detail="Only .jpg/.jpeg/.png/.pdf are supported.")
@@ -657,6 +542,7 @@ def create_app() -> FastAPI:
             google_maps_api_key=google_maps_api_key,
             tasa_code=tasa_code,
             source_file=file.filename,
+            source_kind=source_kind,
         )
         parse_stage = stage_success(
             "parse_extract_map",
@@ -691,6 +577,7 @@ def create_app() -> FastAPI:
                 "original_filename": file.filename,
                 "stored_path": str(upload_path),
                 "preview_url": _runtime_url(upload_path),
+                "source_kind": source_kind,
             },
             "document": document,
             "payload": payload,
@@ -867,210 +754,31 @@ def create_app() -> FastAPI:
 
     @app.post("/api/documents/{document_id}/browser-session/fields/analyze")
     async def analyze_browser_session_fields(document_id: str, req: BrowserSessionAnalyzeRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Browser session is not opened. Click 'Перейти по адресу' first.")
-
-        payload = req.payload or record.get("payload") or {}
-        try:
-            session_state = await _run_browser_call(get_browser_session_state, session_id)
-            current_url = _safe(session_state.get("current_url"))
-            template = FORM_MAPPING_REPO.get_latest_for_url(current_url)
-            hint_map: dict[str, str] = {}
-            if template:
-                for item in template.get("mappings") or []:
-                    selector = _safe(item.get("selector"))
-                    key = _safe(item.get("canonical_key"))
-                    if selector and key:
-                        hint_map[selector] = key
-            analyzed = await _run_browser_call(inspect_browser_session_fields, session_id, payload, mapping_hints=hint_map)
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "session_id": session_id,
-                "current_url": analyzed.get("current_url", ""),
-                "fields": analyzed.get("fields", []),
-                "suggestions": analyzed.get("suggestions", []),
-                "template_mappings": list((template or {}).get("mappings") or []),
-                "canonical_keys": CANONICAL_FIELD_KEYS,
-                "template_loaded": bool(template),
-            }
-        )
+        _ = document_id
+        _ = req
+        LOGGER.info("disabled endpoint called: /api/documents/{document_id}/browser-session/fields/analyze")
+        raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
     @app.post("/api/documents/{document_id}/browser-session/fields/learn")
     async def learn_browser_session_field_mappings(document_id: str, req: BrowserSessionLearnRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Browser session is not opened. Click 'Перейти по адресу' first.")
-        try:
-            session_state = await _run_browser_call(get_browser_session_state, session_id)
-            current_url = _safe(session_state.get("current_url"))
-            template = FORM_MAPPING_REPO.save_template(
-                target_url=current_url,
-                fields=req.fields or [],
-                mappings=req.mappings or [],
-                source="learned",
-            )
-            attach_template_artifacts_to_record(record, template)
-            _write_record(document_id, record)
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "session_id": session_id,
-                "current_url": current_url,
-                "saved": True,
-                "template": template,
-            }
-        )
+        _ = document_id
+        _ = req
+        LOGGER.info("disabled endpoint called: /api/documents/{document_id}/browser-session/fields/learn")
+        raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
     @app.post("/api/documents/{document_id}/browser-session/mapping/save")
     async def save_mapper_from_placeholders(document_id: str, req: BrowserSessionSaveMapperRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Browser session is not opened. Click 'Перейти по адресу' first.")
-        try:
-            collected = await _run_browser_call(collect_browser_session_placeholder_mappings, session_id, timeout_ms=25000)
-            current_url = _safe(collected.get("current_url"))
-            fields = list(collected.get("fields") or [])
-            mappings = list(collected.get("mappings") or [])
-            unknown_vars = list(collected.get("unknown_vars") or [])
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        mapping_source = "placeholder"
-        if not mappings:
-            # Optional: explicit fallback for PDF when placeholders cannot be extracted from viewer.
-            if ".pdf" in current_url.lower() and req.use_auto_pdf_fallback:
-                payload = record.get("payload") or {}
-                analyzed = await _run_browser_call(inspect_browser_session_fields, session_id, payload, mapping_hints={})
-                auto_suggestions = list(analyzed.get("suggestions") or [])
-                mappings = [
-                    {
-                        "selector": _safe(item.get("selector")),
-                        "canonical_key": _safe(item.get("canonical_key")),
-                        "field_kind": "text",
-                        "match_value": "",
-                        "checked_when": "",
-                        "source": "auto_label",
-                        "confidence": float(item.get("confidence") or 0.0),
-                    }
-                    for item in auto_suggestions
-                    if _safe(item.get("selector"))
-                    and _safe(item.get("canonical_key"))
-                    and float(item.get("confidence") or 0.0) >= 0.6
-                ]
-                if not mappings:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=(
-                            "No mapper placeholders found and auto-PDF mapping also failed. "
-                            "Try typing placeholders into real PDF form fields or share this PDF for a specific adapter."
-                        ),
-                    )
-                mapping_source = "auto_label_pdf_fallback"
-            else:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "No mapper placeholders found. Fill fields with variables like {nombre}, {primer_apellido}, {cp}. "
-                        "If needed, enable use_auto_pdf_fallback=true explicitly."
-                    ),
-                )
-
-        existing = FORM_MAPPING_REPO.get_latest_for_url(current_url)
-        if existing and not req.overwrite:
-            raise HTTPException(
-                status_code=409,
-                detail="Mapper already exists for this URL. Use overwrite=true to replace it.",
-            )
-
-        template = FORM_MAPPING_REPO.save_template(
-            target_url=current_url,
-            fields=fields,
-            mappings=mappings,
-            source=mapping_source,
-        )
-        attach_template_artifacts_to_record(record, template)
-        _write_record(document_id, record)
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "session_id": session_id,
-                "current_url": current_url,
-                "saved": True,
-                "overwrite": bool(req.overwrite),
-                "mappings_count": len(mappings),
-                "mapping_source": mapping_source,
-                "unknown_vars": unknown_vars,
-                "template": template,
-            }
-        )
+        _ = document_id
+        _ = req
+        LOGGER.info("disabled endpoint called: /api/documents/{document_id}/browser-session/mapping/save")
+        raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
     @app.post("/api/documents/{document_id}/browser-session/mapping/upload")
     async def upload_mapper_template(document_id: str, req: BrowserSessionUploadMapperRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Browser session is not opened. Click 'Перейти по адресу' first.")
-
-        mappings = [
-            {
-                "selector": _safe(item.get("selector")),
-                "canonical_key": _safe(item.get("canonical_key")),
-                "field_kind": _safe(item.get("field_kind")) or "text",
-                "match_value": _safe(item.get("match_value")),
-                "checked_when": _safe(item.get("checked_when")),
-                "source": "uploaded_file",
-                "confidence": float(item.get("confidence") or 1.0),
-            }
-            for item in (req.mappings or [])
-            if _safe(item.get("selector"))
-        ]
-        if not mappings:
-            raise HTTPException(status_code=422, detail="Mapper file has no valid mappings.")
-
-        try:
-            session_state = await _run_browser_call(get_browser_session_state, session_id)
-            current_url = _safe(session_state.get("current_url"))
-            analyzed = await _run_browser_call(inspect_browser_session_fields, session_id, payload={}, mapping_hints={})
-            fields = list(analyzed.get("fields") or [])
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        existing = FORM_MAPPING_REPO.get_latest_for_url(current_url)
-        if existing and not req.overwrite:
-            raise HTTPException(
-                status_code=409,
-                detail="Mapper already exists for this URL. Use overwrite=true to replace it.",
-            )
-        template = FORM_MAPPING_REPO.save_template(
-            target_url=current_url,
-            fields=fields,
-            mappings=mappings,
-            source="uploaded_file",
-        )
-        attach_template_artifacts_to_record(record, template)
-        _write_record(document_id, record)
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "session_id": session_id,
-                "current_url": current_url,
-                "saved": True,
-                "overwrite": bool(req.overwrite),
-                "mappings_count": len(mappings),
-                "mapping_source": "uploaded_file",
-                "template": template,
-            }
-        )
+        _ = document_id
+        _ = req
+        LOGGER.info("disabled endpoint called: /api/documents/{document_id}/browser-session/mapping/upload")
+        raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
     @app.post("/api/documents/{document_id}/browser-session/fill")
     async def fill_opened_browser_session(document_id: str, req: BrowserSessionFillRequest) -> JSONResponse:
@@ -1084,10 +792,7 @@ def create_app() -> FastAPI:
         validation_issues = collect_validation_issues(payload, require_tramite=False)
         out_dir = AUTOFILL_DIR / document_id
         out_dir.mkdir(parents=True, exist_ok=True)
-        explicit_mappings = req.explicit_mappings or []
-        fill_strategy = _safe(req.fill_strategy).lower() or "strict_template"
-        if fill_strategy not in {"strict_template", "heuristic_fallback"}:
-            raise HTTPException(status_code=422, detail="fill_strategy must be strict_template or heuristic_fallback.")
+        fill_strategy = "strict_template"
         try:
             session_state = await _run_browser_call(get_browser_session_state, session_id)
             current_url = _safe(session_state.get("current_url"))
@@ -1103,12 +808,8 @@ def create_app() -> FastAPI:
                     "status": "error",
                     "error_code": "TEMPLATE_NOT_FOUND",
                     "document_id": document_id,
-                    "message": "Template mapping is required for strict autofill.",
-                    "detail": "Create/save mapper for current URL, then retry fill.",
+                    "message": "Template mapping not found for current URL.",
                     "form_url": current_url,
-                    "missing_fields": missing_fields,
-                    "validation_issues": validation_issues,
-                    "manual_steps_required": ["analyze_fields", "save_template", "retry_fill"],
                 },
             )
         learned = list(template.get("mappings") or [])
@@ -1120,11 +821,7 @@ def create_app() -> FastAPI:
                     "error_code": "TEMPLATE_INVALID",
                     "document_id": document_id,
                     "message": "Template has no mappings.",
-                    "detail": "Update template mappings and retry.",
                     "form_url": current_url,
-                    "missing_fields": missing_fields,
-                    "validation_issues": validation_issues,
-                    "manual_steps_required": ["update_template", "retry_fill"],
                 },
             )
         merged_map: dict[str, dict[str, Any]] = {}
@@ -1140,19 +837,17 @@ def create_app() -> FastAPI:
                     "source": _safe(item.get("source")) or "template",
                     "confidence": float(item.get("confidence") or 0.99),
                 }
-        for item in explicit_mappings:
-            selector = _safe(item.get("selector"))
-            if selector:
-                merged_map[selector] = {
-                    "selector": selector,
-                    "canonical_key": _safe(item.get("canonical_key")),
-                    "field_kind": _safe(item.get("field_kind")) or "text",
-                    "match_value": _safe(item.get("match_value")),
-                    "checked_when": _safe(item.get("checked_when")),
-                    "source": _safe(item.get("source")) or "user",
-                    "confidence": float(item.get("confidence") or 1.0),
-                }
         effective_mappings = list(merged_map.values())
+        LOGGER.info(
+            "autofill.start document_id=%s session_id=%s url=%s template_source=%s mappings=%s missing_fields=%s validation_issues=%s",
+            document_id,
+            session_id,
+            current_url,
+            _safe(template.get("source")),
+            len(effective_mappings),
+            len(missing_fields),
+            len(validation_issues),
+        )
 
         try:
             result = await _run_browser_call(
@@ -1189,13 +884,7 @@ def create_app() -> FastAPI:
                     "error_code": "FILL_FAILED",
                     "document_id": document_id,
                     "message": "Fill in opened browser session failed.",
-                    "detail": detail,
                     "form_url": record.get("target_url") or current_url,
-                    "missing_fields": missing_fields,
-                    "validation_issues": validation_issues,
-                    "manual_steps_required": ["verify_fields", "continue_manually_if_needed"],
-                    "screenshot_url": screenshot_url,
-                    "dom_snapshot_url": dom_snapshot_url,
                 },
             )
 
@@ -1222,6 +911,16 @@ def create_app() -> FastAPI:
 
         screenshot_url = _artifact_url_from_value(result.get("screenshot"))
         dom_snapshot_url = _artifact_url_from_value(result.get("dom_snapshot"))
+        LOGGER.info(
+            "autofill.result document_id=%s mode=%s filled_fields=%s warnings=%s screenshot_url=%s dom_snapshot_url=%s filled_pdf_url=%s",
+            document_id,
+            mode,
+            len(filled_fields),
+            len(list(result.get("warnings", []) or [])),
+            screenshot_url,
+            dom_snapshot_url,
+            filled_pdf_url,
+        )
         if mode == "pdf_pymupdf" and len(filled_fields) == 0:
             return JSONResponse(
                 status_code=422,
@@ -1230,79 +929,23 @@ def create_app() -> FastAPI:
                     "error_code": "FILL_PARTIAL",
                     "document_id": document_id,
                     "message": "PDF was processed, but no fillable fields were matched.",
-                    "detail": "Run field analysis, map pdf:* fields manually, then retry fill.",
                     "form_url": result.get("current_url") or record.get("target_url") or current_url,
-                    "mode": mode,
-                    "warnings": result.get("warnings", []),
-                    "filled_fields": filled_fields,
-                    "filled_pdf_url": filled_pdf_url,
-                    "missing_fields": missing_fields,
-                    "validation_issues": validation_issues,
-                    "manual_steps_required": ["map_pdf_fields", "retry_fill"],
-                    "screenshot_url": screenshot_url,
-                    "dom_snapshot_url": dom_snapshot_url,
                 },
             )
         return JSONResponse(
             {
                 "document_id": document_id,
                 "form_url": result.get("current_url") or record.get("target_url") or current_url,
-                "mode": mode,
-                "warnings": result.get("warnings", []),
-                "filled_fields": filled_fields,
-                "applied_mappings": result.get("applied_mappings", []),
                 "filled_pdf_url": filled_pdf_url,
-                "missing_fields": missing_fields,
-                "validation_issues": validation_issues,
-                "manual_steps_required": ["verify_filled_fields", "submit_or_download_manually"],
-                "screenshot_url": screenshot_url,
-                "dom_snapshot_url": dom_snapshot_url,
             }
         )
 
     @app.post("/api/documents/{document_id}/autofill-validate")
     def validate_autofill(document_id: str, req: AutofillValidateRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        payload = record.get("payload") or {}
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=422, detail="Invalid payload in document record.")
-
-        target_url = _safe(record.get("target_url") or record.get("form_url") or "")
-        if not target_url:
-            raise HTTPException(status_code=422, detail="Target URL is missing for this document.")
-
-        resolved_filled = _resolve_runtime_path(req.filled_pdf_path or req.filled_pdf_url or "")
-        if not resolved_filled:
-            preview = record.get("autofill_preview") or {}
-            fallback = _safe(preview.get("filled_pdf") or preview.get("dom_snapshot"))
-            resolved_filled = _resolve_runtime_path(fallback)
-
-        if not resolved_filled.exists():
-            raise HTTPException(status_code=404, detail=f"Filled PDF not found: {resolved_filled}")
-
-        template = FORM_MAPPING_REPO.get_latest_for_url(target_url)
-        if not template:
-            raise HTTPException(status_code=404, detail="Template mapping not found for target URL.")
-
-        mappings = [m for m in list(template.get("mappings") or []) if _safe(m.get("canonical_key"))]
-        if not mappings:
-            raise HTTPException(status_code=422, detail="Template mapping has no mappings.")
-
-        try:
-            report = validate_filled_pdf_against_mapping(
-                payload=payload,
-                filled_pdf_path=resolved_filled,
-                mappings=mappings,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        report["document_id"] = document_id
-        report["filled_pdf_path"] = str(resolved_filled)
-        report["filled_pdf_url"] = _artifact_url_from_value(resolved_filled)
-        report["template_updated_at"] = _safe(template.get("updated_at"))
-        report["template_source"] = _safe(template.get("source"))
-        return JSONResponse(report)
+        _ = document_id
+        _ = req
+        LOGGER.info("disabled endpoint called: /api/documents/{document_id}/autofill-validate")
+        raise HTTPException(status_code=404, detail="Validation endpoint is disabled.")
 
     @app.post("/api/documents/{document_id}/browser-session/close")
     async def close_managed_browser_session(document_id: str) -> JSONResponse:

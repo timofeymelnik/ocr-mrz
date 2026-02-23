@@ -13,6 +13,19 @@ class ValidationError(ValueError):
     pass
 
 
+def _normalize_sex_code(value: str) -> str:
+    v = re.sub(r"[^A-Z]", "", (value or "").upper())
+    if not v:
+        return ""
+    if v in {"H", "M", "X"}:
+        return v
+    if v in {"F", "FEMALE", "WOMAN", "MUJER"}:
+        return "M"
+    if v in {"MALE", "MAN", "HOMBRE"}:
+        return "H"
+    return ""
+
+
 def validate_dni(document_number: str) -> bool:
     doc = re.sub(r"[^A-Z0-9]", "", (document_number or "").upper())
     if not re.fullmatch(r"\d{8}[A-Z]", doc):
@@ -110,12 +123,22 @@ def _compose_ddmmyyyy(day: str, month: str, year: str) -> str:
 
 
 def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+    payload.setdefault("identificacion", {})
     payload.setdefault("declarante", {})
     payload.setdefault("ingreso", {})
     payload.setdefault("extra", {})
 
+    ident = payload["identificacion"] if isinstance(payload["identificacion"], dict) else {}
+    if not isinstance(payload["identificacion"], dict):
+        payload["identificacion"] = ident
     decl = payload["declarante"] if isinstance(payload["declarante"], dict) else {}
     extra = payload["extra"] if isinstance(payload["extra"], dict) else {}
+    doc_type = str(ident.get("documento_tipo", "") or "").strip().lower()
+    if doc_type not in {"pasaporte", "nif_tie_nie_dni"}:
+        pasaporte = str(ident.get("pasaporte", "") or "").strip()
+        nif_nie = str(ident.get("nif_nie", "") or "").strip()
+        doc_type = "pasaporte" if pasaporte and (not nif_nie or nif_nie == pasaporte) else "nif_tie_nie_dni"
+    ident["documento_tipo"] = doc_type
 
     composed_decl = _compose_ddmmyyyy(
         str(decl.get("fecha_dia", "") or ""),
@@ -145,6 +168,7 @@ def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     extra["fecha_nacimiento_dia"] = str(extra.get("fecha_nacimiento_dia", "") or d2)
     extra["fecha_nacimiento_mes"] = str(extra.get("fecha_nacimiento_mes", "") or m2)
     extra["fecha_nacimiento_anio"] = str(extra.get("fecha_nacimiento_anio", "") or y2)
+    extra["sexo"] = _normalize_sex_code(str(extra.get("sexo", "") or ""))
 
     forma_pago = str(payload["ingreso"].get("forma_pago", "") or "").strip().lower()
     if forma_pago not in {"efectivo", "adeudo"}:
@@ -266,7 +290,7 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
     # OCR document shape -> form payload shape
     pipeline_payload = (((payload.get("pipeline") or {}).get("artifacts") or {}).get("form_payload_for_playwright"))
     if isinstance(pipeline_payload, dict) and "identificacion" in pipeline_payload and "domicilio" in pipeline_payload:
-        return pipeline_payload
+        return _apply_defaults(pipeline_payload)
 
     fields = _pick_form_fields(payload)
     if isinstance(fields, dict) and fields:
@@ -285,11 +309,23 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
             str(fields.get("apellidos", "") or ""),
             str(fields.get("nombre", "") or ""),
         )
-        nif_nie = str(fields.get("nif_nie", "") or "") or str(fields.get("pasaporte", "") or "")
+        doc_type = (
+            str(fields.get("documento_tipo", "") or "").strip().lower()
+            or str(card.get("documento_tipo", "") or "").strip().lower()
+        )
+        if doc_type not in {"pasaporte", "nif_tie_nie_dni"}:
+            doc_type = "pasaporte" if str(fields.get("pasaporte", "") or "").strip() and not str(fields.get("nif_nie", "") or "").strip() else "nif_tie_nie_dni"
+        nif_nie = str(fields.get("nif_nie", "") or "").strip()
+        if not nif_nie and doc_type != "pasaporte":
+            nif_nie = str(fields.get("pasaporte", "") or "").strip()
         normalized = {
             "identificacion": {
                 "nif_nie": nif_nie,
                 "pasaporte": str(fields.get("pasaporte", "") or ""),
+                "documento_tipo": (
+                    str(fields.get("documento_tipo", "") or "")
+                    or str(card.get("documento_tipo", "") or "")
+                ),
                 "nombre_apellidos": nombre_apellidos,
                 "primer_apellido": primer_apellido,
                 "segundo_apellido": segundo_apellido,
@@ -334,7 +370,7 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
                 "fecha_nacimiento_anio": str(fields.get("fecha_nacimiento_anio", "") or ""),
                 "nacionalidad": str(fields.get("nacionalidad", "") or card.get("nacionalidad", "") or ""),
                 "pais_nacimiento": str(fields.get("pais_nacimiento", "") or card.get("pais_nacimiento", "") or ""),
-                "sexo": str(fields.get("sexo", "") or card.get("sexo", "") or ""),
+                "sexo": _normalize_sex_code(str(fields.get("sexo", "") or card.get("sexo", "") or "")),
                 "estado_civil": str(fields.get("estado_civil", "") or card.get("estado_civil", "") or ""),
                 "lugar_nacimiento": str(fields.get("lugar_nacimiento", "") or card.get("lugar_nacimiento", "") or ""),
                 "nombre_padre": str(fields.get("nombre_padre", "") or card.get("nombre_padre", "") or ""),
