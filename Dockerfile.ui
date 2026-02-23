@@ -4,6 +4,9 @@ WORKDIR /app
 
 RUN corepack enable
 
+ENV NEXT_DISABLE_SWC_DOWNLOAD=1 \
+    NEXT_TELEMETRY_DISABLED=1
+
 COPY ui/package.json ui/pnpm-lock.yaml ./
 RUN pnpm install --no-frozen-lockfile
 
