@@ -7,17 +7,17 @@ from validators import normalize_payload_for_form
 def test_build_tasa_document_prefers_mrz_identity_and_reconstructs_split_nie() -> None:
     ocr_text = "\n".join(
         [
-            "DEX_NIE1: Z",
-            "DEX_NIE_2: 4171700",
-            "DEX_NIE_3: B",
-            "DEX_APE1: FORM",
-            "DEX_NOMBRE: NAME",
+            "DEX_NIE1: X",
+            "DEX_NIE_2: 1234567",
+            "DEX_NIE_3: Z",
+            "DEX_APE1: TESTER",
+            "DEX_NOMBRE: EXAMPLE",
             "DEX_DIA_NAC: 01",
             "DEX_MES_NAC: 01",
             "DEX_ANYO_NAC: 1980",
             "DEX_NACION: ESP",
-            "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<",
-            "L898902C36UTO7408122F1204159ZE184226B<<<<<10",
+            "P<UTOEXAMPLE<<ALFA<BETA<<<<<<<<<<<<<<<<<<<<<<",
+            "L898902C36UTO7408122M1204159ZE184226B<<<<<10",
         ]
     )
 
@@ -26,8 +26,8 @@ def test_build_tasa_document_prefers_mrz_identity_and_reconstructs_split_nie() -
 
     assert card.get("nie_or_nif") == "X1234567Z"
     assert card.get("fecha_nacimiento") == "12/08/1974"
-    assert card.get("apellidos") == "Eriksson"
-    assert card.get("nombre") == "Anna Maria"
+    assert card.get("apellidos") == "Example"
+    assert card.get("nombre") == "Alfa Beta"
 
 
 def test_normalize_payload_for_form_sets_document_type_defaults() -> None:

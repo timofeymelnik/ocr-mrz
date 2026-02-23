@@ -27,20 +27,20 @@ def test_build_value_map_extracts_house_token_from_nombre_via() -> None:
         "identificacion": {"nombre_apellidos": "EXAMPLE TESTER, ALFA", "nif_nie": "X1234567Z"},
         "domicilio": {
             "tipo_via": "Urbanizacion",
-            "nombre_via": "Pueblo de Guadalmina casa 21",
+            "nombre_via": "Conjunto Demo casa 21",
             "numero": "8A",
             "escalera": "",
             "piso": "",
             "puerta": "",
             "municipio": "DemoCity",
-            "provincia": "DemoProvince",
-            "cp": "29678",
+            "provincia": "DemoProv",
+            "cp": "12345",
         },
         "extra": {},
         "declarante": {},
     }
     values = build_autofill_value_map(payload)
-    assert values["nombre_via"] == "Pueblo de Guadalmina"
+    assert values["nombre_via"] == "Conjunto Demo"
     assert values["numero"] == "8A"
     assert values["puerta"] == "21"
 
@@ -55,9 +55,9 @@ def test_build_value_map_extracts_num_piso_puerta_when_embedded() -> None:
             "escalera": "",
             "piso": "",
             "puerta": "",
-            "municipio": "Madrid",
-            "provincia": "Madrid",
-            "cp": "28013",
+            "municipio": "DemoTown",
+            "provincia": "DemoProv",
+            "cp": "10001",
         },
         "extra": {},
         "declarante": {},
@@ -74,18 +74,18 @@ def test_build_value_map_ignores_noisy_floor_cp_value() -> None:
         "identificacion": {"nombre_apellidos": "EXAMPLE TESTER, ALFA", "nif_nie": "X1234567Z"},
         "domicilio": {
             "tipo_via": "Urbanizacion",
-            "nombre_via": "Pueblo de Guadalmina casa 21",
+            "nombre_via": "Conjunto Demo casa 21",
             "numero": "8A",
             "escalera": "",
             "piso": "C.P.",
             "puerta": "",
             "municipio": "DemoCity",
-            "provincia": "DemoProvince",
-            "cp": "29678",
+            "provincia": "DemoProv",
+            "cp": "12345",
         },
         "extra": {},
         "declarante": {},
     }
     values = build_autofill_value_map(payload)
     assert values["piso"] == ""
-    assert values["domicilio_en_espana"] == "Urbanizacion Pueblo de Guadalmina 8A 21"
+    assert values["domicilio_en_espana"] == "Urbanizacion Conjunto Demo 8A 21"
