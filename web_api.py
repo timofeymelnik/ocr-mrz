@@ -601,10 +601,13 @@ def create_app() -> FastAPI:
     async def upload_document(
         file: UploadFile = File(...),
         tasa_code: str = Form(default="790_012"),
-        source_kind: str = Form(default="anketa"),
+        source_kind: str = Form(...),
     ) -> JSONResponse:
         if not file.filename or not _allowed_suffix(file.filename):
             raise HTTPException(status_code=400, detail="Only .jpg/.jpeg/.png/.pdf are supported.")
+        source_kind = _safe(source_kind).lower()
+        if source_kind not in {"anketa", "passport", "nie_tie", "visa"}:
+            raise HTTPException(status_code=422, detail="source_kind is required and must be one of: anketa, passport, nie_tie, visa")
 
         document_id = uuid.uuid4().hex
         suffix = Path(file.filename).suffix.lower()

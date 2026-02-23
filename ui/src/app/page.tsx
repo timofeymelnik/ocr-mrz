@@ -19,7 +19,7 @@ import type {
 } from "@/lib/types";
 
 type Step = "upload" | "review" | "prepare" | "autofill";
-type UploadSourceKind = "anketa" | "passport" | "nie_tie" | "visa";
+type UploadSourceKind = "" | "anketa" | "passport" | "nie_tie" | "visa";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const CLIENT_AGENT_BASE = process.env.NEXT_PUBLIC_CLIENT_AGENT_BASE || "http://127.0.0.1:8787";
@@ -165,7 +165,7 @@ export default function HomePage() {
   const [savedDocsFilter, setSavedDocsFilter] = useState("");
   const [loadingSavedDocs, setLoadingSavedDocs] = useState(false);
   const [deletingDocumentId, setDeletingDocumentId] = useState("");
-  const [uploadSourceKind, setUploadSourceKind] = useState<UploadSourceKind>("anketa");
+  const [uploadSourceKind, setUploadSourceKind] = useState<UploadSourceKind>("");
   const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([]);
   const [selectedMergeSourceId, setSelectedMergeSourceId] = useState("");
   const [mergePreview, setMergePreview] = useState<EnrichByIdentityResponse["enrichment_preview"]>([]);
@@ -228,7 +228,7 @@ export default function HomePage() {
     setFechaNacimientoAnio("");
     setTelefonoCountryCode("+34");
     setTelefonoLocalNumber("");
-    setUploadSourceKind("anketa");
+    setUploadSourceKind("");
     setMergeCandidates([]);
     setSelectedMergeSourceId("");
     setMergePreview([]);
@@ -468,6 +468,10 @@ export default function HomePage() {
   async function uploadDocument() {
     if (!file) {
       setError("Выберите файл .jpg/.jpeg/.png/.pdf");
+      return;
+    }
+    if (!uploadSourceKind) {
+      setError("Выберите тип документа перед запуском OCR.");
       return;
     }
     setUploading(true);
@@ -790,13 +794,14 @@ export default function HomePage() {
                   value={uploadSourceKind}
                   onChange={(e) => setUploadSourceKind(e.target.value as UploadSourceKind)}
                 >
+                  <option value="">-- выберите тип документа --</option>
                   <option value="anketa">Анкета</option>
                   <option value="passport">Паспорт</option>
                   <option value="nie_tie">NIE/TIE/DNI</option>
                   <option value="visa">Виза</option>
                 </select>
               </div>
-              <Button onClick={uploadDocument} disabled={!file || uploading}>
+              <Button onClick={uploadDocument} disabled={!file || !uploadSourceKind || uploading}>
                 {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Запустить OCR и парсинг
               </Button>

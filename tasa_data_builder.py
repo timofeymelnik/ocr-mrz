@@ -447,7 +447,12 @@ def _extract_passport_candidate(lines: list[str], text: str) -> str:
     for i, line in enumerate(lines):
         if not marker_re.search(line):
             continue
-        for j in range(max(0, i - 3), min(len(lines), i + 7)):
+        # Prefer values on the marker line and in following lines.
+        # Looking backwards tends to capture unrelated visa/sticker ids.
+        candidate_indexes = list(range(i, min(len(lines), i + 8)))
+        best_value = ""
+        best_score = -1
+        for j in candidate_indexes:
             candidate = _clean_spaces(lines[j])
             if stop_re.search(candidate):
                 continue
@@ -455,10 +460,21 @@ def _extract_passport_candidate(lines: list[str], text: str) -> str:
             if not m:
                 continue
             value = re.sub(r"\s+", "", m.group(0).upper())
-            if len(value) >= 7 and not re.fullmatch(r"\d{7,10}", value):
-                return value
+            if not value:
+                continue
+            score = 0
+            if marker_re.search(candidate):
+                score += 20
+            score += max(0, 10 - (j - i))
             if re.fullmatch(r"\d{8,9}", value):
-                return value
+                score += 5
+            if len(value) >= 7 and not re.fullmatch(r"\d{7,10}", value):
+                score += 3
+            if score > best_score:
+                best_score = score
+                best_value = value
+        if best_value:
+            return best_value
 
     block_match = re.search(
         r"DATOS DEL DOCUMENTO:(.*?)(?:DATOS DEL VIAJE:|FIRMA|$)",

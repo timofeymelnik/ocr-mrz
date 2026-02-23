@@ -6,7 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -45,14 +45,14 @@ class BrowserSessionOpenRequest(BaseModel):
 class BrowserSessionFillRequest(BaseModel):
     payload: dict[str, Any]
     timeout_ms: int = 25000
-    explicit_mappings: list[dict[str, Any]] | None = None
+    explicit_mappings: Optional[list[dict[str, Any]]] = None
     fill_strategy: str = "strict_template"
-    document_id: str | None = None
+    document_id: Optional[str] = None
 
 
 class BrowserSessionInspectRequest(BaseModel):
     payload: dict[str, Any]
-    mapping_hints: dict[str, str] | None = None
+    mapping_hints: Optional[dict[str, str]] = None
 
 
 def _safe(value: Any) -> str:
