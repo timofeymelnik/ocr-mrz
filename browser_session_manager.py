@@ -29,7 +29,6 @@ from urllib.parse import urlparse
 @dataclass
 class BrowserSessionRecord:
     session_id: str
-    playwright: Playwright
     browser: Browser
     context: BrowserContext
     page: Page
@@ -40,6 +39,30 @@ class BrowserSessionRecord:
 _SESSIONS: dict[str, BrowserSessionRecord] = {}
 _SESSIONS_LOCK = RLock()
 _PLACEHOLDER_RE = re.compile(r"^\{([a-z_]+)\}$", re.I)
+_PLAYWRIGHT: Playwright | None = None
+_PLAYWRIGHT_LOCK = RLock()
+
+
+def _get_or_start_playwright() -> Playwright:
+    global _PLAYWRIGHT
+    with _PLAYWRIGHT_LOCK:
+        if _PLAYWRIGHT is None:
+            _PLAYWRIGHT = sync_playwright().start()
+        return _PLAYWRIGHT
+
+
+def _stop_playwright_if_idle() -> None:
+    global _PLAYWRIGHT
+    with _SESSIONS_LOCK:
+        has_sessions = bool(_SESSIONS)
+    if has_sessions:
+        return
+    with _PLAYWRIGHT_LOCK:
+        if _PLAYWRIGHT is None:
+            return
+        playwright = _PLAYWRIGHT
+        _PLAYWRIGHT = None
+    playwright.stop()
 
 
 def _chromium_executable_path() -> str | None:
@@ -143,7 +166,7 @@ def open_browser_session(
     slowmo: int = 80,
     timeout_ms: int = 25000,
 ) -> dict[str, Any]:
-    p = sync_playwright().start()
+    p = _get_or_start_playwright()
     browser = _launch_chromium(
         p,
         headless=headless,
@@ -158,7 +181,6 @@ def open_browser_session(
     session_id = uuid.uuid4().hex
     record = BrowserSessionRecord(
         session_id=session_id,
-        playwright=p,
         browser=browser,
         context=context,
         page=page,
@@ -395,7 +417,5 @@ def close_browser_session(session_id: str) -> None:
         try:
             session.context.close()
         finally:
-            try:
-                session.browser.close()
-            finally:
-                session.playwright.stop()
+            session.browser.close()
+    _stop_playwright_if_idle()
