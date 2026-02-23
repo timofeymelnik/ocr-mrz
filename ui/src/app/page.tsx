@@ -11,6 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import type {
   AutofillPreviewResponse,
+  EnrichByIdentityResponse,
+  MergeCandidate,
   Payload,
   SavedCrmDocument,
   UploadResponse,
@@ -20,11 +22,12 @@ type Step = "upload" | "review" | "prepare" | "autofill";
 type UploadSourceKind = "anketa" | "passport" | "nie_tie" | "visa";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const CLIENT_AGENT_BASE = process.env.NEXT_PUBLIC_CLIENT_AGENT_BASE || "http://127.0.0.1:8787";
 
-function toUrl(path: string): string {
+function toUrl(path: string, base: string): string {
   if (!path) return "";
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  return `${API_BASE}${path}`;
+  return `${base}${path}`;
 }
 
 function ddmmyyyyToIso(value: string): string {
@@ -163,6 +166,12 @@ export default function HomePage() {
   const [loadingSavedDocs, setLoadingSavedDocs] = useState(false);
   const [deletingDocumentId, setDeletingDocumentId] = useState("");
   const [uploadSourceKind, setUploadSourceKind] = useState<UploadSourceKind>("anketa");
+  const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([]);
+  const [selectedMergeSourceId, setSelectedMergeSourceId] = useState("");
+  const [mergePreview, setMergePreview] = useState<EnrichByIdentityResponse["enrichment_preview"]>([]);
+  const [mergeAppliedFields, setMergeAppliedFields] = useState<string[]>([]);
+  const [mergeSkippedFields, setMergeSkippedFields] = useState<string[]>([]);
+  const [mergeLoading, setMergeLoading] = useState(false);
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
 
@@ -172,6 +181,23 @@ export default function HomePage() {
     }, 250);
     return () => clearTimeout(timer);
   }, [savedDocsFilter]);
+
+  function applyMergeStateFromCandidates(
+    candidates: MergeCandidate[] | undefined,
+    preferredSourceId?: string,
+  ) {
+    const next = candidates || [];
+    setMergeCandidates(next);
+    const preferred = (preferredSourceId || "").trim();
+    if (preferred && next.some((row) => row.document_id === preferred)) {
+      setSelectedMergeSourceId(preferred);
+      return;
+    }
+    if (selectedMergeSourceId && next.some((row) => row.document_id === selectedMergeSourceId)) {
+      return;
+    }
+    setSelectedMergeSourceId(next[0]?.document_id || "");
+  }
 
   function resetWorkflow() {
     setStep("upload");
@@ -203,6 +229,12 @@ export default function HomePage() {
     setTelefonoCountryCode("+34");
     setTelefonoLocalNumber("");
     setUploadSourceKind("anketa");
+    setMergeCandidates([]);
+    setSelectedMergeSourceId("");
+    setMergePreview([]);
+    setMergeAppliedFields([]);
+    setMergeSkippedFields([]);
+    setMergeLoading(false);
     setError("");
     setDragOver(false);
   }
@@ -278,13 +310,17 @@ export default function HomePage() {
       setDocumentId(data.document_id);
       setPayload(data.payload);
       syncNamePartsFromPayload(data.payload);
-      setPreviewUrl(toUrl(data.preview_url || ""));
+      setPreviewUrl(toUrl(data.preview_url || "", API_BASE));
       setFormUrl(data.form_url);
       setTargetUrl(data.target_url || data.form_url);
       setBrowserSessionId("");
       setBrowserSessionAlive(false);
       setBrowserCurrentUrl("");
       setMissingFields(data.missing_fields || []);
+      applyMergeStateFromCandidates(data.merge_candidates, data.identity_source_document_id || "");
+      setMergePreview(data.enrichment_preview || []);
+      setMergeAppliedFields((data.enrichment_preview || []).map((row) => row.field));
+      setMergeSkippedFields([]);
       setAutofill(null);
       setStep("review");
     } catch (e) {
@@ -452,13 +488,17 @@ export default function HomePage() {
       setDocumentId(data.document_id);
       setPayload(data.payload);
       syncNamePartsFromPayload(data.payload);
-      setPreviewUrl(toUrl(data.preview_url));
+      setPreviewUrl(toUrl(data.preview_url, API_BASE));
       setFormUrl(data.form_url);
       setTargetUrl(data.target_url || data.form_url);
       setBrowserSessionId("");
       setBrowserSessionAlive(false);
       setBrowserCurrentUrl("");
       setMissingFields(data.missing_fields || []);
+      applyMergeStateFromCandidates(data.merge_candidates, data.identity_source_document_id || "");
+      setMergePreview(data.enrichment_preview || []);
+      setMergeAppliedFields((data.enrichment_preview || []).map((row) => row.field));
+      setMergeSkippedFields([]);
       setStep("review");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
@@ -518,11 +558,74 @@ export default function HomePage() {
       setPayload(confirmedPayload);
       syncNamePartsFromPayload(confirmedPayload);
       setMissingFields(confirmed.missing_fields || []);
+      applyMergeStateFromCandidates(confirmed.merge_candidates, confirmed.identity_source_document_id || "");
+      setMergePreview(confirmed.enrichment_preview || []);
+      setMergeAppliedFields((confirmed.enrichment_preview || []).map((row: { field: string }) => row.field));
+      setMergeSkippedFields([]);
       setStep("prepare");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Confirm failed");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function refreshMergeCandidates() {
+    if (!documentId) return;
+    setMergeLoading(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/merge-candidates`);
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = (await resp.json()) as { merge_candidates?: MergeCandidate[] };
+      applyMergeStateFromCandidates(data.merge_candidates);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed loading merge suggestions");
+    } finally {
+      setMergeLoading(false);
+    }
+  }
+
+  async function runMerge(apply: boolean) {
+    if (!documentId) return;
+    if (!selectedMergeSourceId) {
+      setError("Выберите источник данных для merge.");
+      return;
+    }
+    if (apply) {
+      const ok = window.confirm("Применить merge предложенных данных в текущий документ?");
+      if (!ok) return;
+    }
+    setMergeLoading(true);
+    setError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/enrich-by-identity`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apply,
+          source_document_id: selectedMergeSourceId,
+        }),
+      });
+      if (!resp.ok) {
+        throw new Error(await readErrorResponse(resp));
+      }
+      const data = (await resp.json()) as EnrichByIdentityResponse;
+      setMergePreview(data.enrichment_preview || []);
+      setMergeAppliedFields(data.applied_fields || []);
+      setMergeSkippedFields(data.skipped_fields || []);
+      setMissingFields(data.missing_fields || []);
+      applyMergeStateFromCandidates(data.merge_candidates, data.identity_source_document_id || selectedMergeSourceId);
+      if (apply && data.payload) {
+        setPayload(data.payload);
+        syncNamePartsFromPayload(data.payload);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Merge failed");
+    } finally {
+      setMergeLoading(false);
     }
   }
 
@@ -535,7 +638,7 @@ export default function HomePage() {
     setSaving(true);
     setError("");
     try {
-      const resp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/open`, {
+      const resp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/open`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -569,13 +672,39 @@ export default function HomePage() {
     setSaving(true);
     setError("");
     try {
-      const autoResp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/fill`, {
+      const stateResp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${browserSessionId}/state`);
+      if (!stateResp.ok) {
+        throw new Error(await readErrorResponse(stateResp));
+      }
+      const stateData = await stateResp.json();
+      const currentUrl = stateData.current_url || targetUrl || formUrl;
+      if (!currentUrl) {
+        throw new Error("Current URL is empty in browser session.");
+      }
+
+      const templateResp = await fetch(`${API_BASE}/api/documents/${documentId}/browser-session/template`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          current_url: currentUrl,
+          payload,
+          fill_strategy: "strict_template",
+        }),
+      });
+      if (!templateResp.ok) {
+        throw new Error(await readErrorResponse(templateResp));
+      }
+      const templateData = await templateResp.json();
+
+      const autoResp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${browserSessionId}/fill`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           payload,
           timeout_ms: 25000,
-          fill_strategy: "strict_template",
+          explicit_mappings: templateData.effective_mappings || [],
+          fill_strategy: templateData.fill_strategy || "strict_template",
+          document_id: documentId,
         }),
       });
       if (!autoResp.ok) {
@@ -584,9 +713,10 @@ export default function HomePage() {
       const autoData: AutofillPreviewResponse = await autoResp.json();
       setAutofill({
         ...autoData,
-        filled_pdf_url: autoData.filled_pdf_url ? toUrl(autoData.filled_pdf_url) : "",
+        filled_pdf_url: autoData.filled_pdf_url ? toUrl(autoData.filled_pdf_url, CLIENT_AGENT_BASE) : "",
       });
-      setFormUrl(autoData.form_url || targetUrl || formUrl);
+      setFormUrl(currentUrl);
+      setBrowserCurrentUrl(currentUrl);
       setStep("autofill");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Autofill in opened browser session failed");
@@ -729,6 +859,62 @@ export default function HomePage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-5">
+              <section className="space-y-2 rounded-md border p-3">
+                <h3 className="text-sm font-semibold">Merge данных из других документов</h3>
+                <p className="text-xs text-muted-foreground">
+                  Система только предлагает поля для дозаполнения. Данные применяются только после вашего подтверждения.
+                </p>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={refreshMergeCandidates} disabled={mergeLoading || saving}>
+                    {mergeLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Обновить кандидатов
+                  </Button>
+                </div>
+                <Label>Источник для merge</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={selectedMergeSourceId}
+                  onChange={(e) => setSelectedMergeSourceId(e.target.value)}
+                >
+                  <option value="">-- выбрать документ --</option>
+                  {mergeCandidates.map((candidate) => (
+                    <option key={candidate.document_id} value={candidate.document_id}>
+                      {candidate.name || "Без имени"} | {candidate.document_number || "без номера"} | score {candidate.score}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => runMerge(false)}
+                    disabled={mergeLoading || saving || !selectedMergeSourceId}
+                  >
+                    {mergeLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Показать предложения
+                  </Button>
+                  <Button size="sm" onClick={() => runMerge(true)} disabled={mergeLoading || saving || !selectedMergeSourceId}>
+                    {mergeLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Применить merge
+                  </Button>
+                </div>
+                {mergePreview.length > 0 ? (
+                  <div className="max-h-40 overflow-auto rounded-md border p-2 text-xs">
+                    <div>Будет заполнено: {mergeAppliedFields.length}</div>
+                    <div>Пропущено: {mergeSkippedFields.length}</div>
+                    {mergePreview.map((row) => (
+                      <div key={`${row.field}-${row.suggested_value}`}>
+                        {row.field}: {row.suggested_value}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">Нет предложений по merge.</div>
+                )}
+              </section>
+
+              <Separator />
+
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Identificación</h3>
                 <Label>Tipo документа</Label>

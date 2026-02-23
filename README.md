@@ -71,6 +71,21 @@ source .venv/bin/activate
 uvicorn web_api:app --reload --port 8000
 ```
 
+### Локальный Browser Agent (отдельный сервис на клиенте)
+
+Этот сервис нужен для сценария: backend/API крутится на Raspberry Pi, а Chromium запускается на ноуте пользователя.
+
+```bash
+source .venv/bin/activate
+uvicorn client_browser_agent:app --host 127.0.0.1 --port 8787
+```
+
+Проверка:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
 ### Запуск UI
 
 ```bash

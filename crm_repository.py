@@ -155,6 +155,7 @@ class CRMRepository:
         identity_match_found: bool = False,
         identity_source_document_id: str = "",
         enrichment_preview: list[dict[str, Any]] | None = None,
+        merge_candidates: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         now = _now_iso()
         existing = self._get(document_id) or {}
@@ -180,6 +181,7 @@ class CRMRepository:
             "identity_source_document_id": str(identity_source_document_id or existing.get("identity_source_document_id") or ""),
             "enrichment_preview": enrichment_preview if enrichment_preview is not None else (existing.get("enrichment_preview") or []),
             "enrichment_log": existing.get("enrichment_log") or {},
+            "merge_candidates": merge_candidates if merge_candidates is not None else (existing.get("merge_candidates") or []),
         }
         self._save(record)
         return record
@@ -213,6 +215,7 @@ class CRMRepository:
             "identity_source_document_id": str(existing.get("identity_source_document_id") or ""),
             "enrichment_preview": existing.get("enrichment_preview") or [],
             "enrichment_log": existing.get("enrichment_log") or {},
+            "merge_candidates": existing.get("merge_candidates") or [],
         }
         self._save(record)
         return record
@@ -241,15 +244,25 @@ class CRMRepository:
         q = (query or "").strip()
         limit = max(1, min(int(limit or 30), 200))
         if self._mongo_enabled and self._collection is not None:
-            filter_doc: dict[str, Any] = {}
+            filter_doc: dict[str, Any] = {
+                "$or": [
+                    {"merged_into_document_id": {"$exists": False}},
+                    {"merged_into_document_id": ""},
+                ]
+            }
             if q:
                 regex = {"$regex": re.escape(q), "$options": "i"}
                 filter_doc = {
-                    "$or": [
-                        {"identifiers.name": regex},
-                        {"identifiers.document_number": regex},
-                        {"identifiers.nif_nie": regex},
-                        {"identifiers.passport": regex},
+                    "$and": [
+                        filter_doc,
+                        {
+                            "$or": [
+                                {"identifiers.name": regex},
+                                {"identifiers.document_number": regex},
+                                {"identifiers.nif_nie": regex},
+                                {"identifiers.passport": regex},
+                            ]
+                        },
                     ]
                 }
             docs = (
@@ -275,6 +288,8 @@ class CRMRepository:
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
+                continue
+            if str(doc.get("merged_into_document_id") or "").strip():
                 continue
             summary = _summary_from_record(doc)
             if q:

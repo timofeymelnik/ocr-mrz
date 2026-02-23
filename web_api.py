@@ -77,6 +77,12 @@ class BrowserSessionFillRequest(BaseModel):
     fill_strategy: str = "strict_template"
 
 
+class BrowserSessionTemplateRequest(BaseModel):
+    current_url: str
+    payload: dict[str, Any] | None = None
+    fill_strategy: str = "strict_template"
+
+
 class BrowserSessionAnalyzeRequest(BaseModel):
     payload: dict[str, Any] | None = None
 
@@ -103,6 +109,7 @@ class AutofillValidateRequest(BaseModel):
 
 class EnrichByIdentityRequest(BaseModel):
     apply: bool = True
+    source_document_id: str | None = None
 
 
 def _safe(value: Any) -> str:
@@ -170,6 +177,72 @@ def _identity_candidates(payload: dict[str, Any]) -> list[str]:
         if v and v not in out:
             out.append(v)
     return out
+
+
+def _name_tokens(payload: dict[str, Any]) -> set[str]:
+    parts = [
+        _safe_payload_get(payload, "identificacion.primer_apellido"),
+        _safe_payload_get(payload, "identificacion.segundo_apellido"),
+        _safe_payload_get(payload, "identificacion.nombre"),
+        _safe_payload_get(payload, "identificacion.nombre_apellidos"),
+    ]
+    joined = " ".join(parts).upper()
+    return {t for t in re.split(r"[^A-Z0-9]+", joined) if len(t) >= 2}
+
+
+def _merge_candidates_for_payload(document_id: str, payload: dict[str, Any], *, limit: int = 10) -> list[dict[str, Any]]:
+    target_ids = set(_identity_candidates(payload))
+    target_name_tokens = _name_tokens(payload)
+
+    out: list[dict[str, Any]] = []
+    summaries = CRM_REPO.search_documents(query="", limit=200)
+    for item in summaries:
+        candidate_id = _safe(item.get("document_id"))
+        if not candidate_id or candidate_id == document_id:
+            continue
+        crm_doc = CRM_REPO.get_document(candidate_id) or {}
+        source_payload = (
+            crm_doc.get("effective_payload")
+            or crm_doc.get("edited_payload")
+            or crm_doc.get("ocr_payload")
+            or {}
+        )
+        if not isinstance(source_payload, dict):
+            continue
+        candidate_ids = set(_identity_candidates(source_payload))
+        candidate_name_tokens = _name_tokens(source_payload)
+
+        identity_overlap = sorted(target_ids & candidate_ids)
+        name_overlap = sorted(target_name_tokens & candidate_name_tokens)
+        score = 0
+        reasons: list[str] = []
+        if identity_overlap:
+            score += 100
+            reasons.append("document_match")
+        if len(name_overlap) >= 2:
+            score += 40
+            reasons.append("name_overlap")
+        elif len(name_overlap) == 1:
+            score += 15
+            reasons.append("partial_name_overlap")
+        if score <= 0:
+            continue
+
+        out.append(
+            {
+                "document_id": candidate_id,
+                "name": _safe(item.get("name")),
+                "document_number": _safe(item.get("document_number")),
+                "updated_at": _safe(item.get("updated_at")),
+                "score": score,
+                "reasons": reasons,
+                "identity_overlap": identity_overlap,
+                "name_overlap": name_overlap,
+            }
+        )
+
+    out.sort(key=lambda row: (int(row.get("score") or 0), row.get("updated_at") or ""), reverse=True)
+    return out[:limit]
 
 
 def _safe_payload_get(payload: dict[str, Any], path: str) -> str:
@@ -302,6 +375,7 @@ def _record_from_crm(document_id: str, crm_doc: dict[str, Any]) -> dict[str, Any
         "identity_match_found": bool(crm_doc.get("identity_match_found")),
         "identity_source_document_id": crm_doc.get("identity_source_document_id") or "",
         "enrichment_preview": crm_doc.get("enrichment_preview") or [],
+        "merge_candidates": crm_doc.get("merge_candidates") or [],
     }
 
 
@@ -334,9 +408,11 @@ def create_app() -> FastAPI:
         payload: dict[str, Any],
         *,
         persist: bool = True,
+        source_document_id: str = "",
     ) -> dict[str, Any]:
         identity_candidates = _identity_candidates(payload)
-        if not identity_candidates:
+        source_doc_id = _safe(source_document_id)
+        if not identity_candidates and not source_doc_id:
             return {
                 "identity_match_found": False,
                 "identity_source_document_id": "",
@@ -347,12 +423,26 @@ def create_app() -> FastAPI:
                 "payload": payload,
             }
 
-        source_record = CRM_REPO.find_latest_by_identities(identity_candidates, exclude_document_id=document_id)
+        source_record: dict[str, Any] | None = None
+        if source_doc_id:
+            source_record = CRM_REPO.get_document(source_doc_id)
+            if not source_record or _safe(source_record.get("document_id")) == document_id:
+                return {
+                    "identity_match_found": False,
+                    "identity_source_document_id": "",
+                    "identity_key": identity_candidates[0] if identity_candidates else "",
+                    "enrichment_preview": [],
+                    "applied_fields": [],
+                    "skipped_fields": [],
+                    "payload": payload,
+                }
+        elif identity_candidates:
+            source_record = CRM_REPO.find_latest_by_identities(identity_candidates, exclude_document_id=document_id)
         if not source_record:
             return {
                 "identity_match_found": False,
                 "identity_source_document_id": "",
-                "identity_key": identity_candidates[0],
+                "identity_key": identity_candidates[0] if identity_candidates else "",
                 "enrichment_preview": [],
                 "applied_fields": [],
                 "skipped_fields": [],
@@ -367,7 +457,7 @@ def create_app() -> FastAPI:
         )
         source_document_id = str(source_record.get("document_id") or "")
         source_candidates = _identity_candidates(source_payload if isinstance(source_payload, dict) else {})
-        identity_key = next((c for c in identity_candidates if c in source_candidates), identity_candidates[0])
+        identity_key = next((c for c in identity_candidates if c in source_candidates), identity_candidates[0] if identity_candidates else "")
         enriched, applied, skipped = _enrich_payload_fill_empty(
             payload=payload,
             source_payload=source_payload if isinstance(source_payload, dict) else {},
@@ -404,6 +494,14 @@ def create_app() -> FastAPI:
                     },
                 },
             )
+            if source_doc_id and source_doc_id != document_id:
+                CRM_REPO.update_document_fields(
+                    source_doc_id,
+                    {
+                        "status": "merged",
+                        "merged_into_document_id": document_id,
+                    },
+                )
         return {
             "identity_match_found": True,
             "identity_source_document_id": source_document_id,
@@ -565,8 +663,7 @@ def create_app() -> FastAPI:
         )
 
         payload = normalize_payload_for_form(document)
-        enrichment = enrich_record_payload_by_identity(document_id, payload, persist=False)
-        payload = enrichment.get("payload") if isinstance(enrichment.get("payload"), dict) else payload
+        merge_candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
         missing_fields = collect_validation_errors(payload, require_tramite=False)
         validation_issues = collect_validation_issues(payload, require_tramite=False)
 
@@ -586,9 +683,10 @@ def create_app() -> FastAPI:
             "manual_steps_required": ["verify_filled_fields", "submit_or_download_manually"],
             "form_url": DEFAULT_TARGET_URL,
             "target_url": DEFAULT_TARGET_URL,
-            "identity_match_found": bool(enrichment.get("identity_match_found")),
-            "identity_source_document_id": _safe(enrichment.get("identity_source_document_id")),
-            "enrichment_preview": list(enrichment.get("enrichment_preview") or []),
+            "identity_match_found": False,
+            "identity_source_document_id": "",
+            "enrichment_preview": [],
+            "merge_candidates": merge_candidates,
         }
         _write_record(document_id, record)
         CRM_REPO.upsert_from_upload(
@@ -603,6 +701,7 @@ def create_app() -> FastAPI:
             identity_match_found=bool(record.get("identity_match_found")),
             identity_source_document_id=_safe(record.get("identity_source_document_id")),
             enrichment_preview=list(record.get("enrichment_preview") or []),
+            merge_candidates=merge_candidates,
         )
 
         return JSONResponse(
@@ -619,6 +718,7 @@ def create_app() -> FastAPI:
                 "identity_match_found": bool(record.get("identity_match_found")),
                 "identity_source_document_id": _safe(record.get("identity_source_document_id")),
                 "enrichment_preview": list(record.get("enrichment_preview") or []),
+                "merge_candidates": merge_candidates,
             }
         )
 
@@ -627,25 +727,35 @@ def create_app() -> FastAPI:
         record = read_or_bootstrap_record(document_id)
         return JSONResponse(record)
 
+    @app.get("/api/documents/{document_id}/merge-candidates")
+    def get_merge_candidates(document_id: str) -> JSONResponse:
+        record = read_or_bootstrap_record(document_id)
+        payload = record.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="Invalid payload in document record.")
+        candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
+        record["merge_candidates"] = candidates
+        _write_record(document_id, record)
+        CRM_REPO.update_document_fields(document_id, {"merge_candidates": candidates})
+        return JSONResponse({"document_id": document_id, "merge_candidates": candidates})
+
     @app.post("/api/documents/{document_id}/confirm")
     def confirm_document(document_id: str, req: ConfirmRequest) -> JSONResponse:
         record = read_or_bootstrap_record(document_id)
         payload = req.payload
-        enrichment = enrich_record_payload_by_identity(document_id, payload, persist=False)
-        payload = enrichment.get("payload") if isinstance(enrichment.get("payload"), dict) else payload
+        merge_candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
         missing_fields = collect_validation_errors(payload, require_tramite=False)
         validation_issues = collect_validation_issues(payload, require_tramite=False)
         record["payload"] = payload
         record["missing_fields"] = missing_fields
-        record["identity_match_found"] = bool(enrichment.get("identity_match_found"))
-        record["identity_source_document_id"] = _safe(enrichment.get("identity_source_document_id"))
-        record["enrichment_preview"] = list(enrichment.get("enrichment_preview") or [])
+        record["merge_candidates"] = merge_candidates
         _write_record(document_id, record)
         CRM_REPO.save_edited_payload(
             document_id=document_id,
             payload=payload,
             missing_fields=missing_fields,
         )
+        CRM_REPO.update_document_fields(document_id, {"merge_candidates": merge_candidates})
         return JSONResponse(
             {
                 "document_id": document_id,
@@ -656,6 +766,7 @@ def create_app() -> FastAPI:
                 "identity_match_found": bool(record.get("identity_match_found")),
                 "identity_source_document_id": _safe(record.get("identity_source_document_id")),
                 "enrichment_preview": list(record.get("enrichment_preview") or []),
+                "merge_candidates": merge_candidates,
             }
         )
 
@@ -666,12 +777,18 @@ def create_app() -> FastAPI:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=422, detail="Invalid payload in document record.")
 
-        enrichment = enrich_record_payload_by_identity(document_id, payload, persist=bool(req.apply))
+        enrichment = enrich_record_payload_by_identity(
+            document_id,
+            payload,
+            persist=bool(req.apply),
+            source_document_id=_safe(req.source_document_id),
+        )
         enriched_payload = enrichment.get("payload") if isinstance(enrichment.get("payload"), dict) else payload
         missing_fields = collect_validation_errors(enriched_payload, require_tramite=False)
         validation_issues = collect_validation_issues(enriched_payload, require_tramite=False)
 
         if not req.apply:
+            merge_candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
             return JSONResponse(
                 {
                     "document_id": document_id,
@@ -681,11 +798,18 @@ def create_app() -> FastAPI:
                     "applied_fields": enrichment.get("applied_fields", []),
                     "skipped_fields": enrichment.get("skipped_fields", []),
                     "enrichment_preview": enrichment.get("enrichment_preview", []),
-                    "missing_fields": missing_fields,
-                    "validation_issues": validation_issues,
-                    "payload": enriched_payload,
+                    "merge_candidates": merge_candidates,
+                    "missing_fields": collect_validation_errors(payload, require_tramite=False),
+                    "validation_issues": collect_validation_issues(payload, require_tramite=False),
+                    "payload": payload,
                 }
             )
+
+        merge_candidates = _merge_candidates_for_payload(document_id, enriched_payload, limit=10)
+        updated_record = read_or_bootstrap_record(document_id)
+        updated_record["merge_candidates"] = merge_candidates
+        _write_record(document_id, updated_record)
+        CRM_REPO.update_document_fields(document_id, {"merge_candidates": merge_candidates})
 
         return JSONResponse(
             {
@@ -696,6 +820,7 @@ def create_app() -> FastAPI:
                 "applied_fields": enrichment.get("applied_fields", []),
                 "skipped_fields": enrichment.get("skipped_fields", []),
                 "enrichment_preview": enrichment.get("enrichment_preview", []),
+                "merge_candidates": merge_candidates,
                 "missing_fields": missing_fields,
                 "validation_issues": validation_issues,
                 "payload": enriched_payload,
@@ -937,6 +1062,69 @@ def create_app() -> FastAPI:
                 "document_id": document_id,
                 "form_url": result.get("current_url") or record.get("target_url") or current_url,
                 "filled_pdf_url": filled_pdf_url,
+            }
+        )
+
+    @app.post("/api/documents/{document_id}/browser-session/template")
+    def resolve_template_for_client_browser(document_id: str, req: BrowserSessionTemplateRequest) -> JSONResponse:
+        record = read_or_bootstrap_record(document_id)
+        current_url = _safe(req.current_url)
+        if not current_url:
+            raise HTTPException(status_code=422, detail="current_url is required.")
+
+        payload = req.payload or record.get("payload") or {}
+        missing_fields = collect_validation_errors(payload, require_tramite=False)
+        validation_issues = collect_validation_issues(payload, require_tramite=False)
+
+        template = FORM_MAPPING_REPO.get_latest_for_url(current_url)
+        if not template:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "status": "error",
+                    "error_code": "TEMPLATE_NOT_FOUND",
+                    "document_id": document_id,
+                    "message": "Template mapping not found for current URL.",
+                    "form_url": current_url,
+                },
+            )
+
+        learned = list(template.get("mappings") or [])
+        if not learned:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "status": "error",
+                    "error_code": "TEMPLATE_INVALID",
+                    "document_id": document_id,
+                    "message": "Template has no mappings.",
+                    "form_url": current_url,
+                },
+            )
+
+        merged_map: dict[str, dict[str, Any]] = {}
+        for item in learned:
+            selector = _safe(item.get("selector"))
+            if selector:
+                merged_map[selector] = {
+                    "selector": selector,
+                    "canonical_key": _safe(item.get("canonical_key")),
+                    "field_kind": _safe(item.get("field_kind")) or "text",
+                    "match_value": _safe(item.get("match_value")),
+                    "checked_when": _safe(item.get("checked_when")),
+                    "source": _safe(item.get("source")) or "template",
+                    "confidence": float(item.get("confidence") or 0.99),
+                }
+
+        return JSONResponse(
+            {
+                "document_id": document_id,
+                "form_url": current_url,
+                "fill_strategy": req.fill_strategy,
+                "template_source": _safe(template.get("source")),
+                "effective_mappings": list(merged_map.values()),
+                "missing_fields": missing_fields,
+                "validation_issues": validation_issues,
             }
         )
 

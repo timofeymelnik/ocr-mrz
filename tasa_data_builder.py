@@ -253,6 +253,26 @@ def _normalize_sex_code(value: str) -> str:
     return ""
 
 
+def _normalize_document_sex_code(value: str) -> str:
+    """
+    Normalization for identity documents (passport/visa MRZ conventions):
+    - F/female/mujer -> M (Mujer)
+    - M/male/hombre -> H (Hombre)
+    """
+    v = _upper_compact(value)
+    if not v:
+        return ""
+    if v in {"F", "FEMALE", "WOMAN", "MUJER"}:
+        return "M"
+    if v in {"M", "MALE", "MAN", "HOMBRE"}:
+        return "H"
+    if v == "X":
+        return "X"
+    if v in {"H"}:
+        return "H"
+    return ""
+
+
 def _normalize_puerta(value: str) -> str:
     v = _clean_spaces(value)
     if not v:
@@ -283,6 +303,23 @@ def _to_spanish_date(value: str) -> str:
     if iso and re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso):
         return f"{iso[8:10]}/{iso[5:7]}/{iso[0:4]}"
     return ""
+
+
+def _normalize_nationality(value: str) -> str:
+    raw = _clean_spaces(value)
+    if not raw:
+        return ""
+    # Nationality cannot be a date or numeric token.
+    if _to_spanish_date(raw):
+        return ""
+    if re.search(r"\d", raw):
+        return ""
+    letters = re.sub(r"[^A-ZÁÉÍÓÚÑÜ ]", "", raw.upper())
+    letters = _clean_spaces(letters)
+    if not letters:
+        return ""
+    # Keep ISO-3 uppercase; keep demonyms/country text uppercased as-is.
+    return letters
 
 
 def _clean_address_freeform(value: str) -> str:
@@ -350,6 +387,31 @@ def _is_labelish_fragment(value: str) -> bool:
         "PADRE",
     ]
     if any(p in v for p in noisy_phrases):
+        return True
+    return False
+
+
+def _is_invalid_place_of_birth(value: str) -> bool:
+    v = _clean_spaces(value)
+    if not v:
+        return True
+    up = v.upper()
+    compact = _upper_compact(v)
+    if re.fullmatch(r"(?:X/)?[MFX]", compact):
+        return True
+    if _to_spanish_date(v):
+        return True
+    blocked = [
+        "УЧЕТНАЯ ЗАПИС",
+        "UCHETNAYA ZAPIS",
+        "ACCOUNT",
+        "PLACE OF BIRT",
+        "PLACE OF BIRTH",
+        "CITY OF BIRTH",
+    ]
+    if any(token in up for token in blocked):
+        return True
+    if _is_labelish_fragment(v):
         return True
     return False
 
@@ -448,11 +510,11 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
     if not dob:
         dob_guess, _ = _extract_birth_nationality(text)
         dob = _to_spanish_date(dob_guess)
-    nat = _extract_labeled_value(lines, ["NACIONALIDAD", "NATIONALITY"])
-    if not nat or not re.fullmatch(r"[A-Za-z]{3}", _clean_spaces(nat)):
+    nat = _normalize_nationality(_extract_labeled_value(lines, ["NACIONALIDAD", "NATIONALITY"]))
+    if not nat:
         _, nat_guess = _extract_birth_nationality(text)
-        nat = nat or nat_guess
-    if re.fullmatch(r"[A-Za-z]{3}", nat):
+        nat = _normalize_nationality(nat_guess)
+    if re.fullmatch(r"[A-Z]{3}", nat):
         nat = nat.upper()
     sexo_raw = _extract_labeled_value(lines, ["SEXO", "SEX"])
     sexo = ""
@@ -467,7 +529,7 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         mrz_sex_match = re.search(r"[A-Z0-9<]{10}[A-Z]{3}\d{6}[0-9<]([MFX])\d{6}", all_text_up)
         if mrz_sex_match:
             sexo = mrz_sex_match.group(1)
-    sexo = _normalize_sex_code(sexo)
+    sexo = _upper_compact(sexo)
     father_name = _extract_labeled_value(lines, ["PADRE", "DAD", "FATHER", "NOMBRE\\s+DEL\\s+PADRE"])
     mother_name = _extract_labeled_value(lines, ["MADRE", "MOTHER", "NOMBRE\\s+DE\\s+LA\\s+MADRE"])
     if not father_name and not mother_name:
@@ -498,11 +560,12 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         lines,
         ["LUGAR\\s+DE\\s+NACIMIENTO", "CITY\\s+OF\\s+BIRTH", "PLACE\\s+OF\\s+BIRTH", "МЕСТО\\s+РОЖДЕНИЯ"],
     )
-    if place_of_birth and re.fullmatch(r"(?:X/)?[MFX]", _upper_compact(place_of_birth)):
+    if _is_invalid_place_of_birth(place_of_birth):
         place_of_birth = ""
     if not place_of_birth:
         country_birth = _extract_labeled_value(lines, ["PAIS\\s+NACIMIENTO", "COUNTRY\\s+OF\\s+BIRTH"])
-        place_of_birth = country_birth
+        if not _is_invalid_place_of_birth(country_birth):
+            place_of_birth = country_birth
     if not place_of_birth:
         for i, raw in enumerate(lines):
             up = raw.upper()
@@ -512,9 +575,7 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
                 cand = _clean_spaces(lines[j])
                 if not cand:
                     continue
-                if _is_labelish_fragment(cand):
-                    continue
-                if re.fullmatch(r"(?:X/)?[MFX]", _upper_compact(cand)):
+                if _is_invalid_place_of_birth(cand):
                     continue
                 place_of_birth = cand
                 break
@@ -624,6 +685,23 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         if _contains_cyrillic(mother_name):
             mother_name = _transliterate_ru(mother_name).upper()
 
+    if _is_invalid_place_of_birth(place_of_birth):
+        place_of_birth = ""
+    if not place_of_birth and is_rf_passport:
+        # Frequent RF passport OCR layout: "M/M <place_of_birth>"
+        for raw in lines:
+            line = _clean_spaces(raw)
+            m = re.search(r"\b[MFX]\s*/\s*[MFX]\b\s*(.+)$", line, flags=re.I)
+            if not m:
+                continue
+            candidate = _clean_spaces(m.group(1))
+            if _contains_cyrillic(candidate):
+                candidate = _transliterate_ru(candidate).upper()
+            if _is_invalid_place_of_birth(candidate):
+                continue
+            place_of_birth = candidate
+            break
+
     return {
         "nif_nie": _upper_compact(nif_nie),
         "apellidos": _clean_spaces(apellidos.title()) if apellidos else "",
@@ -670,7 +748,7 @@ def _extract_from_mrz_candidates(candidates: list[str]) -> tuple[str, str, str, 
     # TD3 passport-like blocks: 2 lines ~44 chars
     for i in range(len(candidates) - 1):
         block2 = [candidates[i], candidates[i + 1]]
-        if not (25 <= len(block2[0]) <= 46 and 35 <= len(block2[1]) <= 46):
+        if not (20 <= len(block2[0]) <= 46 and 35 <= len(block2[1]) <= 46):
             continue
         if not block2[0].startswith("P<"):
             continue
@@ -727,6 +805,49 @@ def _extract_from_mrz_candidates(candidates: list[str]) -> tuple[str, str, str, 
         if surname or name or dob or nat:
             return surname, name, dob, nat
     return "", "", "", ""
+
+
+def _extract_visa_mrz_fields(candidates: list[str]) -> tuple[str, str, str, str, str, str]:
+    """
+    Parse visa-like 2-line MRZ blocks (starting with V...).
+    Returns: surname, name, passport_number, dob_iso, nationality, sex_raw.
+    """
+    for i in range(len(candidates) - 1):
+        l1 = candidates[i].strip().upper()
+        l2 = candidates[i + 1].strip().upper()
+        if len(l1) < 20 or len(l2) < 30:
+            continue
+        if not l1.startswith("V"):
+            continue
+        if "<<" not in l1:
+            continue
+        m2 = re.search(r"([A-Z0-9<]{9})([0-9<])([A-Z]{3})(\d{6})([0-9<])([MFX<])(\d{6})", l2)
+        if not m2:
+            continue
+
+        passport = re.sub(r"<", "", m2.group(1))
+        nat = m2.group(3)
+        dob_raw = m2.group(4)
+        sex = m2.group(6).replace("<", "")
+
+        dob = ""
+        if re.fullmatch(r"\d{6}", dob_raw):
+            yy = int(dob_raw[:2])
+            year = 1900 + yy if yy > 30 else 2000 + yy
+            dob = normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+
+        name_line = re.sub(r"^V<?[A-Z]{3,4}", "", l1)
+        name_line = name_line.lstrip("<")
+        surname = ""
+        name = ""
+        if "<<" in name_line:
+            left, right = name_line.split("<<", 1)
+            surname = re.sub(r"<+", " ", left).strip().title()
+            name = re.sub(r"<+", " ", right).strip().title()
+
+        if surname or name or passport or dob or nat:
+            return surname, name, passport, dob, nat, sex
+    return "", "", "", "", "", ""
 
 
 def _extract_doc_candidates(text: str) -> list[str]:
@@ -1269,6 +1390,9 @@ def build_tasa_document(
     mrz_candidates = _find_mrz_candidates(merged)
     mrz = parse_mrz_lines(mrz_candidates)
     mrz_surname, mrz_name, mrz_dob, mrz_nat = _extract_from_mrz_candidates(mrz_candidates)
+    visa_mrz_surname, visa_mrz_name, visa_mrz_passport, visa_mrz_dob, visa_mrz_nat, visa_mrz_sex = _extract_visa_mrz_fields(
+        mrz_candidates
+    )
     doc_candidates = _extract_doc_candidates(merged)
     if form_pdf.get("nie_or_nif"):
         doc_candidates = [form_pdf["nie_or_nif"], *doc_candidates]
@@ -1278,7 +1402,10 @@ def build_tasa_document(
     if not nie_or_nif and visual_fields.get("nif_nie"):
         nie_or_nif = visual_fields["nif_nie"]
     passport_number = _upper_compact(
-        _safe(overrides.get("pasaporte")) or _safe(form_pdf.get("pasaporte")) or _safe(visual_fields.get("pasaporte"))
+        _safe(overrides.get("pasaporte"))
+        or _safe(form_pdf.get("pasaporte"))
+        or _safe(visual_fields.get("pasaporte"))
+        or visa_mrz_passport
     )
     nie_or_nif = _upper_compact(nie_or_nif)
     if nie_or_nif and not validate_spanish_document_number(nie_or_nif):
@@ -1303,6 +1430,11 @@ def build_tasa_document(
         nombre = mrz_name or nombre
         fecha_nacimiento = mrz_dob or fecha_nacimiento
         nacionalidad = mrz_nat or nacionalidad
+    if source_kind_norm == "visa":
+        apellidos = visa_mrz_surname or apellidos
+        nombre = visa_mrz_name or nombre
+        fecha_nacimiento = visa_mrz_dob or fecha_nacimiento
+        nacionalidad = visa_mrz_nat or nacionalidad
 
     apellidos = _clean_spaces(_safe(overrides.get("apellidos")) or apellidos)
     nombre = _clean_spaces(_safe(overrides.get("nombre")) or nombre)
@@ -1330,8 +1462,9 @@ def build_tasa_document(
     if not fecha_nacimiento:
         fecha_nacimiento = _safe(visual_fields.get("fecha_nacimiento"))
     fecha_nacimiento = _to_spanish_date(fecha_nacimiento)
+    nacionalidad = _normalize_nationality(nacionalidad)
     if not nacionalidad:
-        nacionalidad = _safe(visual_fields.get("nacionalidad"))
+        nacionalidad = _normalize_nationality(_safe(visual_fields.get("nacionalidad")))
     lugar_nacimiento = (
         _safe(overrides.get("lugar_nacimiento"))
         or _safe(form_pdf.get("lugar_nacimiento"))
@@ -1347,6 +1480,15 @@ def build_tasa_document(
             documento_tipo = "nif_tie_nie_dni"
         else:
             documento_tipo = "nif_tie_nie_dni" if validate_spanish_document_number(nie_or_nif) else "pasaporte"
+    sexo_raw = (
+        _safe(overrides.get("sexo"))
+        or _safe(form_pdf.get("sexo"))
+        or (visa_mrz_sex if source_kind_norm == "visa" else "")
+        or _safe(visual_fields.get("sexo"))
+    )
+    sexo_extracted = (
+        _normalize_document_sex_code(sexo_raw) if is_identity_source else _normalize_sex_code(sexo_raw)
+    )
 
     visual_full_name = _clean_spaces(_safe(visual_fields.get("full_name")))
     if _looks_like_name_noise(visual_full_name) or _is_labelish_fragment(visual_full_name):
@@ -1385,7 +1527,7 @@ def build_tasa_document(
         ]:
             if not address_parts.get(field) and form_pdf.get(key):
                 address_parts[field] = _safe(form_pdf[key])
-    if visual_fields:
+    if visual_fields and is_form_source:
         for field, key in [
             ("numero", "numero"),
             ("escalera", "escalera"),
@@ -1472,15 +1614,14 @@ def build_tasa_document(
         "nif_nie": _safe(overrides.get("nif_nie")) or nie_or_nif,
         "pasaporte": _safe(overrides.get("pasaporte"))
         or _safe(form_pdf.get("pasaporte"))
-        or _safe(visual_fields.get("pasaporte")),
+        or _safe(visual_fields.get("pasaporte"))
+        or passport_number,
         "apellidos": _safe(overrides.get("apellidos")) or apellidos,
         "nombre": _safe(overrides.get("nombre")) or nombre,
         "full_name": full_name,
         "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
-        "sexo": _normalize_sex_code(
-            _safe(overrides.get("sexo")) or _safe(form_pdf.get("sexo")) or _safe(visual_fields.get("sexo"))
-        ),
+        "sexo": sexo_extracted,
         "estado_civil": _safe(overrides.get("estado_civil"))
         or _safe(form_pdf.get("estado_civil"))
         or _safe(visual_fields.get("estado_civil")),
@@ -1527,7 +1668,7 @@ def build_tasa_document(
         required_for_form = REQUIRED_FIELDS_VISUAL_GENERIC
         base_fields = {
             "nif_nie": _safe(overrides.get("nif_nie")) or _safe(visual_fields.get("nif_nie")) or nie_or_nif,
-            "pasaporte": _safe(overrides.get("pasaporte")) or _safe(visual_fields.get("pasaporte")),
+            "pasaporte": _safe(overrides.get("pasaporte")) or _safe(visual_fields.get("pasaporte")) or passport_number,
             "apellidos_nombre_razon_social": _safe(overrides.get("apellidos_nombre_razon_social")) or full_name,
             "tipo_via": _safe(address_parts.get("tipo_via")),
             "nombre_via_publica": _safe(address_parts.get("nombre_via_publica")),
@@ -1575,9 +1716,7 @@ def build_tasa_document(
         "full_name": full_name,
         "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
-        "sexo": _normalize_sex_code(
-            _safe(overrides.get("sexo")) or _safe(form_pdf.get("sexo")) or _safe(visual_fields.get("sexo"))
-        ),
+        "sexo": sexo_extracted,
         "estado_civil": _safe(overrides.get("estado_civil"))
         or _safe(form_pdf.get("estado_civil"))
         or _safe(visual_fields.get("estado_civil")),

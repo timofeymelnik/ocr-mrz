@@ -69,6 +69,17 @@ export type Payload = {
   };
 };
 
+export type MergeCandidate = {
+  document_id: string;
+  name: string;
+  document_number: string;
+  updated_at: string;
+  score: number;
+  reasons: string[];
+  identity_overlap: string[];
+  name_overlap: string[];
+};
+
 export type UploadResponse = {
   document_id: string;
   preview_url: string;
@@ -77,9 +88,11 @@ export type UploadResponse = {
   payload: Payload;
   document: Record<string, unknown>;
   missing_fields: string[];
+  validation_issues?: string[];
   manual_steps_required: string[];
   identity_match_found?: boolean;
   identity_source_document_id?: string;
+  merge_candidates?: MergeCandidate[];
   enrichment_preview?: Array<{
     field: string;
     current_value: string;
@@ -104,6 +117,7 @@ export type EnrichByIdentityResponse = {
   identity_key?: string;
   applied_fields: string[];
   skipped_fields: string[];
+  merge_candidates: MergeCandidate[];
   enrichment_preview: Array<{
     field: string;
     current_value: string;
@@ -112,6 +126,7 @@ export type EnrichByIdentityResponse = {
     reason?: string;
   }>;
   missing_fields: string[];
+  validation_issues?: string[];
   payload: Payload;
 };
 

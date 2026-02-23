@@ -8,7 +8,7 @@ from tests.mock_user import MOCK_USER
 def test_build_tasa_document_prefers_mrz_identity_and_reconstructs_split_nie() -> None:
     ident = MOCK_USER["identificacion"]
     extra = MOCK_USER["extra"]
-    nie = ident["nif_nie"]
+    nie = "X1234567Z"
     ocr_text = "\n".join(
         [
             f"DEX_NIE1: {nie[0]}",
@@ -28,7 +28,7 @@ def test_build_tasa_document_prefers_mrz_identity_and_reconstructs_split_nie() -
     document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={})
     card = document.get("card_extracted", {})
 
-    assert card.get("nie_or_nif") == ident["nif_nie"]
+    assert card.get("nie_or_nif") == nie
     assert card.get("fecha_nacimiento") == "12/08/1974"
     assert card.get("apellidos") == "Example"
     assert card.get("nombre") == "Alfa Tester"
@@ -98,3 +98,27 @@ def test_build_tasa_document_handles_truncated_passport_mrz_and_spaced_passport_
     assert card.get("lugar_nacimiento") == "DEMO REGION / DEMOLAND"
     assert fields_790.get("numero") == ""
     assert fields_790.get("pasaporte") == "123456789"
+
+
+def test_build_tasa_document_extracts_visa_mrz_identity() -> None:
+    ocr_text = "\n".join(
+        [
+            "VISADO/VISA ESP",
+            "N.I.E.Z3984420C",
+            "VDESPFEDOTOV<<STEPAN<<<<<<<<<<<<<<<<",
+            "0255851334RUS1308127M2612144<M<<1215",
+        ]
+    )
+    document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="visa")
+    card = document.get("card_extracted", {})
+    fields_790 = document.get("form_790_012", {}).get("fields", {})
+
+    assert card.get("apellidos") == "Fedotov"
+    assert card.get("nombre") == "Stepan"
+    assert card.get("pasaporte") == "025585133"
+    assert card.get("nie_or_nif") == "Z3984420C"
+    assert card.get("nacionalidad") == "RUS"
+    assert card.get("sexo") == "H"
+    assert card.get("fecha_nacimiento") == "12/08/2013"
+    assert fields_790.get("numero") == ""
+    assert fields_790.get("pasaporte") == "025585133"
