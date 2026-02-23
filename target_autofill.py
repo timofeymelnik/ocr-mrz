@@ -121,6 +121,59 @@ def _safe(payload: dict[str, Any], *path: str) -> str:
     return str(node).strip()
 
 
+def _strip_extra_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "")).strip(" ,.-")
+
+
+def _sanitize_floor_token(value: str) -> str:
+    v = _strip_extra_spaces(value).upper()
+    if v in {"CP", "C.P", "C.P.", "CODIGO POSTAL", "CÓDIGO POSTAL"}:
+        return ""
+    return _strip_extra_spaces(value)
+
+
+def _split_address_details(nombre_via: str) -> tuple[str, str, str, str, str]:
+    """
+    Try to extract trailing address detail tokens from street name:
+    numero/escalera/piso/puerta.
+    Keeps original explicit values as source of truth in _build_value_map.
+    """
+    raw = _strip_extra_spaces(nombre_via)
+    if not raw:
+        return "", "", "", "", ""
+
+    work = f" {raw} "
+    inferred_numero = ""
+    inferred_escalera = ""
+    inferred_piso = ""
+    inferred_puerta = ""
+
+    patterns = [
+        ("numero", re.compile(r"\b(?:n[úu]m(?:ero)?\.?|num\.?)\s*([0-9A-Z][0-9A-Z\-]*)\b", re.I)),
+        ("escalera", re.compile(r"\b(?:escalera|esc\.?|portal|bloque)\s*([0-9A-Z][0-9A-Z\-]*)\b", re.I)),
+        ("piso", re.compile(r"\b(?:piso|planta)\s*([0-9A-Zºª][0-9A-Zºª\-]*)\b", re.I)),
+        ("puerta", re.compile(r"\b(?:puerta|pta\.?|casa)\s*([0-9A-Z][0-9A-Z\-]*)\b", re.I)),
+    ]
+
+    for kind, pattern in patterns:
+        m = pattern.search(work)
+        if not m:
+            continue
+        token = (m.group(1) or "").strip().upper()
+        if kind == "numero":
+            inferred_numero = token
+        elif kind == "escalera":
+            inferred_escalera = token
+        elif kind == "piso":
+            inferred_piso = token
+        elif kind == "puerta":
+            inferred_puerta = token
+        work = work[: m.start()] + " " + work[m.end() :]
+
+    cleaned = _strip_extra_spaces(work)
+    return cleaned, inferred_numero, inferred_escalera, inferred_piso, inferred_puerta
+
+
 def _infer_target_type(target_url: str) -> str:
     raw = (target_url or "").lower()
     parsed = urlparse(target_url)
@@ -196,11 +249,14 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
     explicit_apellido2 = _safe(payload, "identificacion", "segundo_apellido")
     explicit_nombre = _safe(payload, "identificacion", "nombre")
     tipo_via = _safe(payload, "domicilio", "tipo_via")
-    nombre_via = _safe(payload, "domicilio", "nombre_via")
-    numero = _safe(payload, "domicilio", "numero")
-    piso = _safe(payload, "domicilio", "piso")
-    puerta = _safe(payload, "domicilio", "puerta")
-    domicilio_en_espana = " ".join(x for x in [tipo_via, nombre_via, numero, piso, puerta] if x).strip()
+    raw_nombre_via = _safe(payload, "domicilio", "nombre_via")
+    cleaned_nombre_via, inferred_numero, inferred_escalera, inferred_piso, inferred_puerta = _split_address_details(raw_nombre_via)
+    nombre_via = cleaned_nombre_via or raw_nombre_via
+    numero = _safe(payload, "domicilio", "numero") or inferred_numero
+    escalera = _safe(payload, "domicilio", "escalera") or inferred_escalera
+    piso = _sanitize_floor_token(_safe(payload, "domicilio", "piso")) or inferred_piso
+    puerta = _safe(payload, "domicilio", "puerta") or inferred_puerta
+    domicilio_en_espana = " ".join(x for x in [tipo_via, nombre_via, numero, escalera, piso, puerta] if x).strip()
     nif_nie = _safe(payload, "identificacion", "nif_nie").upper()
     m_nie = re.fullmatch(r"([XYZ])(\d{7})([A-Z])", re.sub(r"[^A-Z0-9]", "", nif_nie))
     nie_prefix = m_nie.group(1) if m_nie else ""
@@ -225,7 +281,7 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
         "nombre_via": nombre_via,
         "domicilio_en_espana": domicilio_en_espana,
         "numero": numero,
-        "escalera": _safe(payload, "domicilio", "escalera"),
+        "escalera": escalera,
         "piso": piso,
         "puerta": puerta,
         "telefono": _safe(payload, "domicilio", "telefono"),
