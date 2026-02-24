@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 import os
 import shutil
 import requests
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
@@ -20,6 +23,7 @@ from target_autofill import (
     extract_pdf_placeholder_mappings_from_url,
     inspect_form_fields,
     inspect_pdf_fields_from_url,
+    is_template_debug_capture_enabled,
     suggest_mappings_for_fields,
 )
 import re
@@ -41,6 +45,7 @@ _SESSIONS_LOCK = RLock()
 _PLACEHOLDER_RE = re.compile(r"^\{([a-z_]+)\}$", re.I)
 _PLAYWRIGHT: Playwright | None = None
 _PLAYWRIGHT_LOCK = RLock()
+LOGGER = logging.getLogger(__name__)
 
 
 def _get_or_start_playwright() -> Playwright:
@@ -135,6 +140,68 @@ def _new_context(browser: Browser) -> BrowserContext:
     )
 
 
+def _debug_root_dir() -> Path:
+    return Path(__file__).resolve().parent / "runtime" / "template_debug"
+
+
+def _debug_safe(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (value or "").lower()).strip("_")
+
+
+def _capture_template_debug_bundle(
+    *,
+    session: BrowserSessionRecord,
+    stage: str,
+    payload: dict[str, Any],
+    explicit_mappings: list[dict[str, Any]] | None = None,
+) -> None:
+    if not is_template_debug_capture_enabled():
+        return
+    try:
+        current_url = session.page.url if not session.page.is_closed() else session.target_url
+        host = (urlparse(current_url).netloc or "").lower()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = _debug_root_dir() / f"{ts}_{_debug_safe(host)}_{session.session_id[:8]}_{_debug_safe(stage)}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        meta = {
+            "session_id": session.session_id,
+            "stage": stage,
+            "target_url": session.target_url,
+            "current_url": current_url,
+            "captured_at": datetime.now().isoformat(),
+            "pdf_detected": bool(_looks_like_pdf_url(current_url) or _looks_like_pdf_url(session.target_url)),
+        }
+        (run_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        (run_dir / "payload.json").write_text(json.dumps(payload or {}, ensure_ascii=False, indent=2), encoding="utf-8")
+        (run_dir / "explicit_mappings.json").write_text(
+            json.dumps(list(explicit_mappings or []), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        if _looks_like_pdf_url(current_url) or _looks_like_pdf_url(session.target_url):
+            url_for_pdf = current_url if _looks_like_pdf_url(current_url) else session.target_url
+            fields = inspect_pdf_fields_from_url(url_for_pdf, timeout_ms=15000)
+            mappings, unknown_vars = extract_pdf_placeholder_mappings_from_url(url_for_pdf, timeout_ms=15000)
+            (run_dir / "fields.json").write_text(json.dumps(fields, ensure_ascii=False, indent=2), encoding="utf-8")
+            (run_dir / "placeholder_mappings.json").write_text(
+                json.dumps({"mappings": mappings, "unknown_vars": unknown_vars}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        else:
+            fields = inspect_form_fields(session.page)
+            mappings, unknown_vars = extract_html_placeholder_mappings(session.page)
+            (run_dir / "fields.json").write_text(json.dumps(fields, ensure_ascii=False, indent=2), encoding="utf-8")
+            (run_dir / "placeholder_mappings.json").write_text(
+                json.dumps({"mappings": mappings, "unknown_vars": unknown_vars}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (run_dir / "page.html").write_text(session.page.content(), encoding="utf-8")
+            session.page.screenshot(path=str(run_dir / "page.png"), full_page=True)
+    except Exception:
+        LOGGER.exception("Failed capturing template debug bundle at stage=%s", stage)
+
+
 def _navigate_with_fallback(page: Page, target_url: str, timeout_ms: int) -> None:
     errors: list[str] = []
     for wait_until in ("domcontentloaded", "load", "commit"):
@@ -188,6 +255,12 @@ def open_browser_session(
     )
     with _SESSIONS_LOCK:
         _SESSIONS[session_id] = record
+    _capture_template_debug_bundle(
+        session=record,
+        stage="session_opened",
+        payload={},
+        explicit_mappings=None,
+    )
     return {
         "session_id": session_id,
         "target_url": target_url,
@@ -230,6 +303,12 @@ def fill_browser_session(
     with session.lock:
         if session.page.is_closed():
             raise RuntimeError("Browser session page is closed.")
+        _capture_template_debug_bundle(
+            session=session,
+            stage="before_fill",
+            payload=payload,
+            explicit_mappings=explicit_mappings,
+        )
         current_url = session.page.url
         pdf_target_url = ""
         if _looks_like_pdf_url(current_url):
@@ -257,6 +336,12 @@ def fill_browser_session(
                 explicit_mappings=explicit_mappings,
                 strict_template=(fill_strategy != "heuristic_fallback"),
             )
+            _capture_template_debug_bundle(
+                session=session,
+                stage="after_fill",
+                payload=payload,
+                explicit_mappings=explicit_mappings,
+            )
             return {
                 **result,
                 "session_id": session_id,
@@ -269,6 +354,12 @@ def fill_browser_session(
             out_dir,
             explicit_mappings=explicit_mappings,
             strict_template=(fill_strategy != "heuristic_fallback"),
+        )
+        _capture_template_debug_bundle(
+            session=session,
+            stage="after_fill",
+            payload=payload,
+            explicit_mappings=explicit_mappings,
         )
         return {
             **result,
@@ -287,6 +378,7 @@ def inspect_browser_session_fields(
     with session.lock:
         if session.page.is_closed():
             raise RuntimeError("Browser session page is closed.")
+        _capture_template_debug_bundle(session=session, stage="inspect_fields", payload=payload, explicit_mappings=None)
         current_url = session.page.url
         if _looks_like_pdf_url(current_url):
             fields = inspect_pdf_fields_from_url(current_url)

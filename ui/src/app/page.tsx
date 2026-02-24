@@ -23,6 +23,33 @@ type UploadSourceKind = "" | "anketa" | "passport" | "nie_tie" | "visa";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const CLIENT_AGENT_BASE = process.env.NEXT_PUBLIC_CLIENT_AGENT_BASE || "http://127.0.0.1:8787";
+const TARGET_URL_PRESETS = [
+  {
+    key: "doc17_tie",
+    label: "Doc 17 - Formulario TIE",
+    url: "https://www.inclusion.gob.es/documents/410169/2156469/17-Formulario_TIE.pdf",
+  },
+  {
+    key: "doc13_autoriz_regreso",
+    label: "Doc 13 - Autorización de regreso",
+    url: "https://www.inclusion.gob.es/documents/d/migraciones/13-formulario_autoriz_de_regreso",
+  },
+  {
+    key: "doc11_larga_duracion",
+    label: "Doc 11 - Larga duración",
+    url: "https://www.inclusion.gob.es/documents/410169/2156469/11-Formulario_larga_duracixn.pdf",
+  },
+  {
+    key: "tasa_790_052",
+    label: "Tasa 790-052",
+    url: "https://sede.administracionespublicas.gob.es/tasasPDF/prepareProvincia?idModelo=790&idTasa=052",
+  },
+  {
+    key: "tasa_790_012",
+    label: "Tasa 790-012",
+    url: "https://sede.policia.gob.es/Tasa790_012/",
+  },
+] as const;
 
 function toUrl(path: string, base: string): string {
   if (!path) return "";
@@ -142,6 +169,7 @@ export default function HomePage() {
   const [previewUrl, setPreviewUrl] = useState("");
   const [formUrl, setFormUrl] = useState("");
   const [targetUrl, setTargetUrl] = useState("");
+  const [targetPresetKey, setTargetPresetKey] = useState("");
   const [browserSessionId, setBrowserSessionId] = useState("");
   const [browserSessionAlive, setBrowserSessionAlive] = useState(false);
   const [browserCurrentUrl, setBrowserCurrentUrl] = useState("");
@@ -209,6 +237,7 @@ export default function HomePage() {
     setPreviewUrl("");
     setFormUrl("");
     setTargetUrl("");
+    setTargetPresetKey("");
     setBrowserSessionId("");
     setBrowserSessionAlive(false);
     setBrowserCurrentUrl("");
@@ -633,9 +662,10 @@ export default function HomePage() {
     }
   }
 
-  async function openManagedSession() {
+  async function openManagedSession(targetUrlOverride?: string) {
     if (!documentId) return;
-    if (!targetUrl.trim()) {
+    const resolvedTargetUrl = (targetUrlOverride ?? targetUrl).trim();
+    if (!resolvedTargetUrl) {
       setError("Укажите адрес страницы или PDF.");
       return;
     }
@@ -646,7 +676,7 @@ export default function HomePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          target_url: targetUrl,
+          target_url: resolvedTargetUrl,
           headless: false,
           slowmo: 40,
           timeout_ms: 30000,
@@ -659,7 +689,7 @@ export default function HomePage() {
       setBrowserSessionId(data.session_id || "");
       setBrowserSessionAlive(Boolean(data.alive));
       setBrowserCurrentUrl(data.current_url || "");
-      setTargetUrl(data.target_url || targetUrl);
+      setTargetUrl(data.target_url || resolvedTargetUrl);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to open browser session");
     } finally {
@@ -922,26 +952,12 @@ export default function HomePage() {
 
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Identificación</h3>
-                <Label>Tipo документа</Label>
-                <select
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  value={
-                    payload.identificacion.documento_tipo ||
-                    (payload.identificacion.pasaporte && !payload.identificacion.nif_nie ? "pasaporte" : "nif_tie_nie_dni")
-                  }
-                  onChange={(e) => patchPayload("identificacion", "documento_tipo", e.target.value)}
-                >
-                  <option value="nif_tie_nie_dni">NIF/TIE/NIE/DNI</option>
-                  <option value="pasaporte">Pasaporte</option>
-                </select>
                 <Label>NIE (буква + 7 цифр + буква)</Label>
                 <div className="grid grid-cols-3 gap-2">
                   <Input placeholder="Y" value={niePrefix} onChange={(e) => patchNiePart("prefix", e.target.value)} />
                   <Input placeholder="1234567" value={nieNumber} onChange={(e) => patchNiePart("number", e.target.value)} />
                   <Input placeholder="X" value={nieSuffix} onChange={(e) => patchNiePart("suffix", e.target.value)} />
                 </div>
-                <Label>NIF/NIE (собирается из составных полей)</Label>
-                <Input readOnly value={composeNie(niePrefix, nieNumber, nieSuffix) || payload.identificacion.nif_nie} />
                 <Label>Pasaporte (опционально)</Label>
                 <Input
                   value={payload.identificacion.pasaporte || ""}
@@ -1063,105 +1079,126 @@ export default function HomePage() {
 
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Дополнительные персональные поля (CRM)</h3>
-                <Label>Email</Label>
-                <Input value={payload.extra?.email || ""} onChange={(e) => patchExtra("email", e.target.value)} />
-                <Label>Fecha de nacimiento (DD/MM/YYYY)</Label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="space-y-2 rounded-md border p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Контакты</h4>
+                  <Label>Email</Label>
+                  <Input value={payload.extra?.email || ""} onChange={(e) => patchExtra("email", e.target.value)} />
+                </div>
+
+                <div className="space-y-2 rounded-md border p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Рождение и гражданство
+                  </h4>
+                  <Label>Дата рождения (DD/MM/YYYY)</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Input
+                      placeholder="dd"
+                      value={fechaNacimientoDia}
+                      onChange={(e) => patchNacimientoDatePart("day", e.target.value)}
+                    />
+                    <Input
+                      placeholder="mm"
+                      value={fechaNacimientoMes}
+                      onChange={(e) => patchNacimientoDatePart("month", e.target.value)}
+                    />
+                    <Input
+                      placeholder="yyyy"
+                      value={fechaNacimientoAnio}
+                      onChange={(e) => patchNacimientoDatePart("year", e.target.value)}
+                    />
+                  </div>
                   <Input
-                    placeholder="dd"
-                    value={fechaNacimientoDia}
-                    onChange={(e) => patchNacimientoDatePart("day", e.target.value)}
+                    type="date"
+                    value={ddmmyyyyToIso(
+                      composeDdmmyyyy(fechaNacimientoDia, fechaNacimientoMes, fechaNacimientoAnio) ||
+                        payload.extra?.fecha_nacimiento ||
+                        "",
+                    )}
+                    onChange={(e) => {
+                      const next = isoToDdmmyyyy(e.target.value);
+                      const parts = splitDdmmyyyy(next);
+                      patchNacimientoDate(parts.day, parts.month, parts.year);
+                    }}
                   />
+                  <Label>Nacionalidad (гражданство)</Label>
+                  <Input value={payload.extra?.nacionalidad || ""} onChange={(e) => patchExtra("nacionalidad", e.target.value)} />
+                  <Label>País de nacimiento (страна рождения)</Label>
+                  <Input value={payload.extra?.pais_nacimiento || ""} onChange={(e) => patchExtra("pais_nacimiento", e.target.value)} />
+                  <Label>Lugar de nacimiento (место рождения)</Label>
                   <Input
-                    placeholder="mm"
-                    value={fechaNacimientoMes}
-                    onChange={(e) => patchNacimientoDatePart("month", e.target.value)}
-                  />
-                  <Input
-                    placeholder="yyyy"
-                    value={fechaNacimientoAnio}
-                    onChange={(e) => patchNacimientoDatePart("year", e.target.value)}
+                    value={payload.extra?.lugar_nacimiento || ""}
+                    onChange={(e) => patchExtra("lugar_nacimiento", e.target.value)}
                   />
                 </div>
-                <Input
-                  type="date"
-                  value={ddmmyyyyToIso(composeDdmmyyyy(fechaNacimientoDia, fechaNacimientoMes, fechaNacimientoAnio) || payload.extra?.fecha_nacimiento || "")}
-                  onChange={(e) => {
-                    const next = isoToDdmmyyyy(e.target.value);
-                    const parts = splitDdmmyyyy(next);
-                    patchNacimientoDate(parts.day, parts.month, parts.year);
-                  }}
-                />
-                <Label>Nacionalidad</Label>
-                <Input value={payload.extra?.nacionalidad || ""} onChange={(e) => patchExtra("nacionalidad", e.target.value)} />
-                <Label>País</Label>
-                <Input value={payload.extra?.pais_nacimiento || ""} onChange={(e) => patchExtra("pais_nacimiento", e.target.value)} />
-                <Label>Sexo</Label>
-                <select
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  value={payload.extra?.sexo || ""}
-                  onChange={(e) => patchExtra("sexo", e.target.value)}
-                >
-                  <option value="">--</option>
-                  <option value="H">H (Hombre)</option>
-                  <option value="M">M (Mujer)</option>
-                  <option value="X">X</option>
-                </select>
-                <Label>Estado civil</Label>
-                <select
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  value={payload.extra?.estado_civil || ""}
-                  onChange={(e) => patchExtra("estado_civil", e.target.value)}
-                >
-                  <option value="">--</option>
-                  <option value="S">S (Soltero/a)</option>
-                  <option value="C">C (Casado/a)</option>
-                  <option value="V">V (Viudo/a)</option>
-                  <option value="D">D (Divorciado/a)</option>
-                  <option value="Sp">Sp (Separado/a)</option>
-                </select>
-                <Label>Lugar de nacimiento</Label>
-                <Input
-                  value={payload.extra?.lugar_nacimiento || ""}
-                  onChange={(e) => patchExtra("lugar_nacimiento", e.target.value)}
-                />
-                <Label>Nombre del padre</Label>
-                <Input value={payload.extra?.nombre_padre || ""} onChange={(e) => patchExtra("nombre_padre", e.target.value)} />
-                <Label>Nombre de la madre</Label>
-                <Input value={payload.extra?.nombre_madre || ""} onChange={(e) => patchExtra("nombre_madre", e.target.value)} />
-                <Label>Representante legal</Label>
-                <Input
-                  value={payload.extra?.representante_legal || ""}
-                  onChange={(e) => patchExtra("representante_legal", e.target.value)}
-                />
-                <Label>DNI/NIE/PAS representante</Label>
-                <Input
-                  value={payload.extra?.representante_documento || ""}
-                  onChange={(e) => patchExtra("representante_documento", e.target.value)}
-                />
-                <Label>Título representante</Label>
-                <Input
-                  value={payload.extra?.titulo_representante || ""}
-                  onChange={(e) => patchExtra("titulo_representante", e.target.value)}
-                />
-                <Label>Hijas/os escolarización en España (SI/NO)</Label>
-                <div className="flex items-center gap-6 rounded-md border p-3">
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={(payload.extra?.hijos_escolarizacion_espana || "").toUpperCase() === "SI"}
-                      onChange={(e) => patchExtra("hijos_escolarizacion_espana", e.target.checked ? "SI" : "")}
-                    />
-                    SI
-                  </label>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={(payload.extra?.hijos_escolarizacion_espana || "").toUpperCase() === "NO"}
-                      onChange={(e) => patchExtra("hijos_escolarizacion_espana", e.target.checked ? "NO" : "")}
-                    />
-                    NO
-                  </label>
+
+                <div className="space-y-2 rounded-md border p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Личные данные</h4>
+                  <Label>Sexo</Label>
+                  <select
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    value={payload.extra?.sexo || ""}
+                    onChange={(e) => patchExtra("sexo", e.target.value)}
+                  >
+                    <option value="">--</option>
+                    <option value="H">H (Hombre)</option>
+                    <option value="M">M (Mujer)</option>
+                    <option value="X">X</option>
+                  </select>
+                  <Label>Estado civil</Label>
+                  <select
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    value={payload.extra?.estado_civil || ""}
+                    onChange={(e) => patchExtra("estado_civil", e.target.value)}
+                  >
+                    <option value="">--</option>
+                    <option value="S">S (Soltero/a)</option>
+                    <option value="C">C (Casado/a)</option>
+                    <option value="V">V (Viudo/a)</option>
+                    <option value="D">D (Divorciado/a)</option>
+                    <option value="Sp">Sp (Separado/a)</option>
+                  </select>
+                  <Label>Nombre del padre</Label>
+                  <Input value={payload.extra?.nombre_padre || ""} onChange={(e) => patchExtra("nombre_padre", e.target.value)} />
+                  <Label>Nombre de la madre</Label>
+                  <Input value={payload.extra?.nombre_madre || ""} onChange={(e) => patchExtra("nombre_madre", e.target.value)} />
+                </div>
+
+                <div className="space-y-2 rounded-md border p-3">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Представитель</h4>
+                  <Label>Representante legal</Label>
+                  <Input
+                    value={payload.extra?.representante_legal || ""}
+                    onChange={(e) => patchExtra("representante_legal", e.target.value)}
+                  />
+                  <Label>DNI/NIE/PAS representante</Label>
+                  <Input
+                    value={payload.extra?.representante_documento || ""}
+                    onChange={(e) => patchExtra("representante_documento", e.target.value)}
+                  />
+                  <Label>Título representante</Label>
+                  <Input
+                    value={payload.extra?.titulo_representante || ""}
+                    onChange={(e) => patchExtra("titulo_representante", e.target.value)}
+                  />
+                  <Label>Hijas/os escolarización en España (SI/NO)</Label>
+                  <div className="flex items-center gap-6 rounded-md border p-3">
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={(payload.extra?.hijos_escolarizacion_espana || "").toUpperCase() === "SI"}
+                        onChange={(e) => patchExtra("hijos_escolarizacion_espana", e.target.checked ? "SI" : "")}
+                      />
+                      SI
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={(payload.extra?.hijos_escolarizacion_espana || "").toUpperCase() === "NO"}
+                        onChange={(e) => patchExtra("hijos_escolarizacion_espana", e.target.checked ? "NO" : "")}
+                      />
+                      NO
+                    </label>
+                  </div>
                 </div>
               </section>
 
@@ -1193,28 +1230,7 @@ export default function HomePage() {
       ) : null}
 
       {step === "prepare" ? (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[420px_1fr]">
-          <Card className="h-[calc(100vh-180px)] overflow-auto">
-            <CardHeader>
-              <CardTitle>Подготовка к заполнению</CardTitle>
-              <CardDescription>
-                Откройте нужную страницу в отдельной вкладке, дойдите до нужного шага, затем вернитесь и запустите автозаполнение.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Ссылка на форму из backend</Label>
-                <Input readOnly value={formUrl} />
-              </div>
-              <div className="space-y-2">
-                <Label>Статус управляемой сессии</Label>
-                <Input readOnly value={browserSessionId ? `OPEN (${browserSessionId.slice(0, 8)}...)` : "NOT OPEN"} />
-                <Input readOnly value={`Alive: ${browserSessionAlive ? "yes" : "no"}`} />
-                <Input readOnly value={browserCurrentUrl || "Текущий URL неизвестен"} />
-              </div>
-            </CardContent>
-          </Card>
-
+        <div className="grid grid-cols-1 gap-4">
           <Card className="h-[calc(100vh-180px)] overflow-auto">
             <CardHeader>
               <CardTitle>Готов к заполнению</CardTitle>
@@ -1231,7 +1247,30 @@ export default function HomePage() {
                   onChange={(e) => setTargetUrl(e.target.value)}
                 />
               </div>
-              <Button onClick={openManagedSession} disabled={saving || !targetUrl.trim()}>
+              <div className="space-y-2">
+                <Label>Быстрый выбор документа/тасы</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={targetPresetKey}
+                  onChange={(e) => {
+                    const nextKey = e.target.value;
+                    setTargetPresetKey(nextKey);
+                    const preset = TARGET_URL_PRESETS.find((item) => item.key === nextKey);
+                    if (!preset) return;
+                    setTargetUrl(preset.url);
+                    void openManagedSession(preset.url);
+                  }}
+                  disabled={saving}
+                >
+                  <option value="">-- выбрать из частых --</option>
+                  {TARGET_URL_PRESETS.map((preset) => (
+                    <option key={preset.key} value={preset.key}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button onClick={() => void openManagedSession()} disabled={saving || !targetUrl.trim()}>
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Перейти по адресу (открыть управляемое окно)
               </Button>

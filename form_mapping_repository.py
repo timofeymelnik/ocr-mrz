@@ -24,7 +24,13 @@ def _now_iso() -> str:
 
 def _normalize_url_parts(target_url: str) -> tuple[str, str]:
     parsed = urlparse((target_url or "").strip())
-    return (parsed.netloc or "").lower(), (parsed.path or "/").lower()
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "/").lower().strip()
+    if not path:
+        path = "/"
+    if path != "/":
+        path = path.rstrip("/") or "/"
+    return host, path
 
 
 def _safe_token(value: str) -> str:

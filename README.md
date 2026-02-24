@@ -61,8 +61,11 @@ playwright install chromium
 
 ### Артефакты и скриншоты
 
-- По умолчанию скриншоты артефактов выключены: `SAVE_ARTIFACT_SCREENSHOTS=0`.
-- Сохранение скриншотов при ошибках: `SAVE_ARTIFACT_SCREENSHOTS_ON_ERROR=1`.
+- По умолчанию сохраняются только необходимые рабочие артефакты (например, заполненный PDF).
+- Скриншоты и HTML-дампы отключены в обычном режиме.
+- Для локальной отладки шаблонов включите `TEMPLATE_DEBUG_CAPTURE=1`:
+  - подробные снапшоты страницы и инпутов пишутся в `runtime/template_debug/`
+  - только в этом режиме учитываются `SAVE_ARTIFACT_SCREENSHOTS` и `SAVE_ARTIFACT_SCREENSHOTS_ON_ERROR`.
 
 ### Запуск API
 
@@ -288,11 +291,7 @@ python main.py \
 
 - Скачанный файл:  
   `"{filename_prefix}_{nif_nie}_{YYYYMMDD}{ext}"`
-- Скриншоты этапов в папке downloads:
-  - after_fill
-  - before_download
-  - after_download
-  - и error-скриншоты при сбоях
+- Диагностические скриншоты/дампы создаются только при `TEMPLATE_DEBUG_CAPTURE=1`.
 
 ## Troubleshooting
 

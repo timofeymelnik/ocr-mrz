@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ CANONICAL_FIELD_KEYS: list[str] = [
     "escalera",
     "piso",
     "puerta",
+    "piso_puerta",
     "telefono",
     "municipio",
     "provincia",
@@ -48,6 +50,9 @@ CANONICAL_FIELD_KEYS: list[str] = [
     "fecha_dia",
     "fecha_mes",
     "fecha_anio",
+    "importe_euros",
+    "forma_pago",
+    "iban",
     "email",
     "fecha_nacimiento",
     "fecha_nacimiento_dia",
@@ -75,12 +80,19 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def is_template_debug_capture_enabled() -> bool:
+    # Dev-only verbose artifacts for template debugging.
+    return _env_flag("TEMPLATE_DEBUG_CAPTURE", False)
+
+
 def should_save_artifact_screenshots() -> bool:
-    return _env_flag("SAVE_ARTIFACT_SCREENSHOTS", False)
+    # Screenshots are allowed only in explicit template debug mode.
+    return is_template_debug_capture_enabled() and _env_flag("SAVE_ARTIFACT_SCREENSHOTS", False)
 
 
 def should_save_artifact_screenshots_on_error() -> bool:
-    return _env_flag("SAVE_ARTIFACT_SCREENSHOTS_ON_ERROR", True)
+    # Error screenshots must also stay behind debug gate.
+    return is_template_debug_capture_enabled() and _env_flag("SAVE_ARTIFACT_SCREENSHOTS_ON_ERROR", True)
 
 
 def _chromium_executable_path() -> str | None:
@@ -132,6 +144,19 @@ def _sanitize_floor_token(value: str) -> str:
     return _strip_extra_spaces(value)
 
 
+def _compose_floor_door_token(piso: str, puerta: str) -> str:
+    piso_clean = _sanitize_floor_token(piso)
+    puerta_clean = _strip_extra_spaces(puerta)
+    if piso_clean and puerta_clean:
+        piso_norm = _norm_text(piso_clean)
+        puerta_norm = _norm_text(puerta_clean)
+        # Avoid duplicating door token when OCR already merged it into floor (e.g. "5C").
+        if puerta_norm and puerta_norm in piso_norm:
+            return piso_clean
+        return f"{piso_clean} {puerta_clean}".strip()
+    return piso_clean or puerta_clean
+
+
 def _split_address_details(nombre_via: str) -> tuple[str, str, str, str, str]:
     """
     Try to extract trailing address detail tokens from street name:
@@ -178,8 +203,12 @@ def _infer_target_type(target_url: str) -> str:
     raw = (target_url or "").lower()
     parsed = urlparse(target_url)
     path = (parsed.path or "").lower()
+    host = (parsed.netloc or "").lower()
     query = (parsed.query or "").lower()
     if path.endswith(".pdf") or ".pdf" in raw or ".pdf" in query:
+        return "pdf"
+    # inclusion.gob.es serves some PDF forms under extension-less /documents/d/... URLs.
+    if "inclusion.gob.es" in host and path.startswith("/documents/d/"):
         return "pdf"
     # Some official portals serve PDFs on extension-less URLs.
     # Probe headers/redirect target to avoid false html mode.
@@ -256,7 +285,9 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
     escalera = _safe(payload, "domicilio", "escalera") or inferred_escalera
     piso = _sanitize_floor_token(_safe(payload, "domicilio", "piso")) or inferred_piso
     puerta = _safe(payload, "domicilio", "puerta") or inferred_puerta
-    domicilio_en_espana = " ".join(x for x in [tipo_via, nombre_via, numero, escalera, piso, puerta] if x).strip()
+    piso_puerta = _compose_floor_door_token(piso, puerta)
+    # Spanish forms usually split street line from number/floor/door fields.
+    domicilio_en_espana = " ".join(x for x in [tipo_via, nombre_via] if x).strip()
     nif_nie = _safe(payload, "identificacion", "nif_nie").upper()
     m_nie = re.fullmatch(r"([XYZ])(\d{7})([A-Z])", re.sub(r"[^A-Z0-9]", "", nif_nie))
     nie_prefix = m_nie.group(1) if m_nie else ""
@@ -264,6 +295,13 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
     nie_suffix = m_nie.group(3) if m_nie else ""
     fecha_decl = _safe(payload, "declarante", "fecha")
     fecha_nac = _safe(payload, "extra", "fecha_nacimiento")
+    ingreso_forma_pago = _safe(payload, "ingreso", "forma_pago")
+    ingreso_iban = _safe(payload, "ingreso", "iban")
+    importe_euros = (
+        _safe(payload, "autoliquidacion", "importe_euros")
+        or _safe(payload, "autoliquidacion", "importe")
+        or _safe(payload, "autoliquidacion", "importe_complementaria")
+    )
     fecha_dia, fecha_mes, fecha_anio = _split_date_parts(fecha_decl)
     fecha_nacimiento_dia, fecha_nacimiento_mes, fecha_nacimiento_anio = _split_date_parts(fecha_nac)
     return {
@@ -284,6 +322,7 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
         "escalera": escalera,
         "piso": piso,
         "puerta": puerta,
+        "piso_puerta": piso_puerta,
         "telefono": _safe(payload, "domicilio", "telefono"),
         "municipio": _safe(payload, "domicilio", "municipio"),
         "provincia": _safe(payload, "domicilio", "provincia"),
@@ -293,6 +332,9 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
         "fecha_dia": fecha_dia,
         "fecha_mes": fecha_mes,
         "fecha_anio": fecha_anio,
+        "importe_euros": importe_euros,
+        "forma_pago": ingreso_forma_pago,
+        "iban": ingreso_iban,
         "email": _safe(payload, "extra", "email"),
         "fecha_nacimiento": fecha_nac,
         "fecha_nacimiento_dia": fecha_nacimiento_dia,
@@ -317,6 +359,73 @@ def build_autofill_value_map(payload: dict[str, Any]) -> dict[str, str]:
 
 def _normalize_signal(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _normalize_ascii_upper(value: str) -> str:
+    text = unicodedata.normalize("NFD", (value or "").strip().upper())
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+
+
+def _infer_spanish_province_from_cp(cp_value: str) -> str:
+    cp = re.sub(r"\D+", "", cp_value or "")
+    if len(cp) < 2:
+        return ""
+    prefix = cp[:2]
+    by_prefix = {
+        "01": "ALAVA",
+        "02": "ALBACETE",
+        "03": "ALICANTE",
+        "04": "ALMERIA",
+        "05": "AVILA",
+        "06": "BADAJOZ",
+        "07": "BALEARES",
+        "08": "BARCELONA",
+        "09": "BURGOS",
+        "10": "CACERES",
+        "11": "CADIZ",
+        "12": "CASTELLON",
+        "13": "CIUDAD REAL",
+        "14": "CORDOBA",
+        "15": "A CORUNA",
+        "16": "CUENCA",
+        "17": "GIRONA",
+        "18": "GRANADA",
+        "19": "GUADALAJARA",
+        "20": "GUIPUZCOA",
+        "21": "HUELVA",
+        "22": "HUESCA",
+        "23": "JAEN",
+        "24": "LEON",
+        "25": "LLEIDA",
+        "26": "LA RIOJA",
+        "27": "LUGO",
+        "28": "MADRID",
+        "29": "MALAGA",
+        "30": "MURCIA",
+        "31": "NAVARRA",
+        "32": "OURENSE",
+        "33": "ASTURIAS",
+        "34": "PALENCIA",
+        "35": "LAS PALMAS",
+        "36": "PONTEVEDRA",
+        "37": "SALAMANCA",
+        "38": "SANTA CRUZ DE TENERIFE",
+        "39": "CANTABRIA",
+        "40": "SEGOVIA",
+        "41": "SEVILLA",
+        "42": "SORIA",
+        "43": "TARRAGONA",
+        "44": "TERUEL",
+        "45": "TOLEDO",
+        "46": "VALENCIA",
+        "47": "VALLADOLID",
+        "48": "VIZCAYA",
+        "49": "ZAMORA",
+        "50": "ZARAGOZA",
+        "51": "CEUTA",
+        "52": "MELILLA",
+    }
+    return by_prefix.get(prefix, "")
 
 
 def _canonical_from_placeholder(value: str) -> str:
@@ -380,6 +489,7 @@ def _select_if_possible(page: Page, selectors: list[str], value: str) -> bool:
     if not value:
         return False
     desired = value.strip().lower()
+    desired_norm = _normalize_ascii_upper(value)
     for selector in selectors:
         try:
             loc = page.locator(selector).first
@@ -394,13 +504,20 @@ def _select_if_possible(page: Page, selectors: list[str], value: str) -> bool:
                 opt = options.nth(i)
                 text = (opt.inner_text() or "").strip()
                 val = (opt.get_attribute("value") or "").strip()
-                if text.lower() == desired or val.lower() == desired:
+                text_norm = _normalize_ascii_upper(text)
+                val_norm = _normalize_ascii_upper(val)
+                if text.lower() == desired or val.lower() == desired or text_norm == desired_norm or val_norm == desired_norm:
                     if val:
                         loc.select_option(value=val)
                     else:
                         loc.select_option(label=text)
                     return True
-                if desired in text.lower() or (val and desired in val.lower()):
+                if (
+                    desired in text.lower()
+                    or (val and desired in val.lower())
+                    or (desired_norm and desired_norm in text_norm)
+                    or (desired_norm and desired_norm in val_norm)
+                ):
                     if val:
                         loc.select_option(value=val)
                     else:
@@ -902,6 +1019,14 @@ def _apply_explicit_mappings(
                 continue
             if field_kind == "select":
                 ok = _select_if_possible(page, [selector], value)
+                if not ok and canonical_key == "provincia":
+                    # In strict-template mode payload province can be non-canonical
+                    # (e.g. OCR/demo value). Fallback to CP-derived Spanish province.
+                    inferred = _infer_spanish_province_from_cp(values.get("cp", ""))
+                    if inferred:
+                        ok = _select_if_possible(page, [selector], inferred)
+                        if ok:
+                            reason = "cp_inferred_fallback"
             else:
                 ok = _select_if_possible(page, [selector], value) or _set_if_possible(page, [selector], value)
         if ok:
@@ -958,11 +1083,22 @@ def _apply_adapter_admin_tasas_pdf(page: Page, values: dict[str, str], filled: l
         _append_filled(filled, "puerta")
     if values.get("municipio") and _set_if_possible(page, ["#Ctrl_MunicipioDom", "input[name='Ctrl_MunicipioDom']"], values["municipio"]):
         _append_filled(filled, "municipio")
-    if values.get("provincia") and _select_if_possible(
-        page,
-        ["#Ctrl_ProvinciaDom", "select[name='Ctrl_ProvinciaDom']"],
-        values["provincia"],
-    ):
+    province_selected = False
+    if values.get("provincia"):
+        province_selected = _select_if_possible(
+            page,
+            ["#Ctrl_ProvinciaDom", "select[name='Ctrl_ProvinciaDom']"],
+            values["provincia"],
+        )
+    if not province_selected:
+        inferred_province = _infer_spanish_province_from_cp(values.get("cp", ""))
+        if inferred_province:
+            province_selected = _select_if_possible(
+                page,
+                ["#Ctrl_ProvinciaDom", "select[name='Ctrl_ProvinciaDom']"],
+                inferred_province,
+            )
+    if province_selected:
         _append_filled(filled, "provincia")
     if values.get("cp") and _set_if_possible(page, ["#Ctrl_CPostalDom", "input[name='Ctrl_CPostalDom']"], values["cp"]):
         _append_filled(filled, "cp")
@@ -997,16 +1133,25 @@ def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list
             _append_filled(filled, "nacionalidad")
         elif _fill_by_label(page, [r"Nacionalidad"], nationality):
             _append_filled(filled, "nacionalidad")
-    if values.get("tipo_via") and _select_if_possible(
-        page,
-        [
-            "select[name*='via' i]",
-            "select[id*='via' i]",
-            "select[name*='calle' i]",
-        ],
-        values["tipo_via"],
-    ):
-        _append_filled(filled, "tipo_via")
+    if values.get("tipo_via"):
+        if _select_if_possible(
+            page,
+            [
+                "select[name*='via' i]",
+                "select[id*='via' i]",
+                "select[name*='calle' i]",
+            ],
+            values["tipo_via"],
+        ) or _set_if_possible(
+            page,
+            [
+                "#calle",
+                "input[name='calle']",
+                "input[id='calle']",
+            ],
+            values["tipo_via"],
+        ) or _fill_by_label(page, [r"Tipo\s+de\s+v[ií]a", r"Calle/plaza/Avda"], values["tipo_via"]):
+            _append_filled(filled, "tipo_via")
     if values.get("nombre_via") and _fill_by_label(page, [r"Nombre de la v[ií]a p[uú]blica", r"v[ií]a p[uú]blica"], values["nombre_via"]):
         _append_filled(filled, "nombre_via")
     if values.get("numero") and _fill_by_label(page, [r"Num", r"N[uú]m"], values["numero"]):
@@ -1065,6 +1210,39 @@ def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list
             _append_filled(filled, key)
 
 
+def _dismiss_open_datepicker(page: Page) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              const input = document.querySelector("#fecha, input[name='fecha']");
+              if (input) {
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+                input.dispatchEvent(new Event("blur", { bubbles: true }));
+                input.blur();
+              }
+              const closeBtn = document.querySelector("#ui-datepicker-div .ui-datepicker-close");
+              if (closeBtn && closeBtn instanceof HTMLElement && closeBtn.offsetParent !== null) {
+                closeBtn.click();
+                return;
+              }
+              if (typeof window.jQuery === "function") {
+                try { window.jQuery("#fecha").datepicker("hide"); } catch (e) {}
+              }
+              if (document.body && document.body instanceof HTMLElement) {
+                document.body.click();
+              }
+            }
+            """
+        )
+    except Exception:
+        pass
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
 def _pick_html_adapters(target_url: str) -> list[tuple[str, Any]]:
     raw = (target_url or "").lower()
     parsed = urlparse(target_url)
@@ -1097,9 +1275,10 @@ def autofill_existing_html_page(
                 adapter(page, values, filled)
             except Exception:
                 LOGGER.exception("Adapter failed: %s", adapter_name)
+    _dismiss_open_datepicker(page)
 
     screenshot_path = _save_screenshot(page, out_dir, "target_html_autofill") if should_save_artifact_screenshots() else None
-    dom_snapshot_path = _save_html_snapshot(page, out_dir, "target_html_autofill")
+    dom_snapshot_path = _save_html_snapshot(page, out_dir, "target_html_autofill") if is_template_debug_capture_enabled() else None
     return {
         "mode": "html_playwright",
         "adapter": attempted_adapters[0] if attempted_adapters else "unknown",
@@ -1108,7 +1287,7 @@ def autofill_existing_html_page(
         "target_url": page.url,
         "filled_fields": filled,
         "screenshot": str(screenshot_path) if screenshot_path else "",
-        "dom_snapshot": str(dom_snapshot_path),
+        "dom_snapshot": str(dom_snapshot_path) if dom_snapshot_path else "",
         "filled_pdf": "",
         "warnings": [],
     }
@@ -1153,6 +1332,8 @@ def _pdf_value_for_field(field_name: str, value_map: dict[str, str]) -> str:
     n = _norm_text(field_name)
     if not n:
         return ""
+    if "piso" in n and "puert" in n:
+        return value_map.get("piso_puerta", "") or value_map.get("piso", "") or value_map.get("puerta", "")
     if "pasaporte" in n or "passport" in n:
         return value_map.get("pasaporte", "") or value_map.get("nif_nie", "")
     if any(x in n for x in ["nif", "nie", "document"]):
@@ -1191,6 +1372,10 @@ def _pdf_value_for_field(field_name: str, value_map: dict[str, str]) -> str:
         return value_map.get("fecha", "")
     if "fechanacimiento" in n or "birth" in n:
         return value_map.get("fecha_nacimiento", "")
+    if "importe" in n:
+        return value_map.get("importe_euros", "")
+    if "iban" in n:
+        return value_map.get("iban", "")
     if "nacionalidad" in n or "nationality" in n:
         return value_map.get("nacionalidad", "")
     if "estadocivil" in n:
@@ -1411,8 +1596,10 @@ def _autofill_pdf_target(
     data, _ = _fetch_pdf_bytes(target_url, timeout_ms)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    source_path = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_source.pdf"
-    source_path.write_bytes(data)
+    source_path: Path | None = None
+    if is_template_debug_capture_enabled():
+        source_path = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_source.pdf"
+        source_path.write_bytes(data)
 
     value_map = _build_value_map(payload)
     doc = fitz.open(stream=data, filetype="pdf")
@@ -1565,7 +1752,8 @@ def _autofill_pdf_target(
             "filled_fields": touched_fields,
             "applied_mappings": applied_mappings,
             "screenshot": str(screenshot_path) if screenshot_path else "",
-            "dom_snapshot": str(filled_pdf),
+            # Keep API contract stable; in non-debug mode avoid extra dumps.
+            "dom_snapshot": str(source_path) if source_path else "",
             "filled_pdf": str(filled_pdf),
             "warnings": warnings,
         }
