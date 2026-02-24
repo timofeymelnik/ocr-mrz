@@ -179,6 +179,173 @@ def _identity_candidates(payload: dict[str, Any]) -> list[str]:
     return out
 
 
+def _split_full_name_simple(value: str) -> tuple[str, str, str]:
+    raw = _safe(value)
+    if not raw:
+        return "", "", ""
+    if "," in raw:
+        left, right = [x.strip() for x in raw.split(",", 1)]
+        parts = [p for p in re.split(r"\s+", left) if p]
+        return parts[0] if parts else "", " ".join(parts[1:]) if len(parts) > 1 else "", right
+    parts = [p for p in re.split(r"\s+", raw) if p]
+    if len(parts) == 1:
+        return parts[0], "", ""
+    if len(parts) == 2:
+        return parts[0], "", parts[1]
+    return parts[0], parts[1], " ".join(parts[2:])
+
+
+def _family_reference_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+    refs = payload.get("referencias") if isinstance(payload.get("referencias"), dict) else {}
+    fam = refs.get("familiar_que_da_derecho") if isinstance(refs.get("familiar_que_da_derecho"), dict) else {}
+    if not fam:
+        return {}
+    nif_nie = _normalize_identity(_safe(fam.get("nif_nie")))
+    pasaporte = _normalize_identity(_safe(fam.get("pasaporte")))
+    nombre_apellidos = _safe(fam.get("nombre_apellidos"))
+    primer_apellido = _safe(fam.get("primer_apellido"))
+    nombre = _safe(fam.get("nombre"))
+    if not nombre_apellidos:
+        nombre_apellidos = " ".join(x for x in [primer_apellido, nombre] if x).strip()
+    document_number = nif_nie or pasaporte
+    if not document_number:
+        return {}
+    return {
+        "document_number": document_number,
+        "nif_nie": nif_nie,
+        "pasaporte": pasaporte,
+        "nombre_apellidos": nombre_apellidos,
+        "primer_apellido": primer_apellido,
+        "nombre": nombre,
+    }
+
+
+def _build_family_payload(family_ref: dict[str, str]) -> dict[str, Any]:
+    first_last, second_last, first_name = _split_full_name_simple(_safe(family_ref.get("nombre_apellidos")))
+    primer_apellido = _safe(family_ref.get("primer_apellido")) or first_last
+    nombre = _safe(family_ref.get("nombre")) or first_name
+    payload = {
+        "identificacion": {
+            "nif_nie": _safe(family_ref.get("nif_nie")),
+            "pasaporte": _safe(family_ref.get("pasaporte")),
+            "documento_tipo": "pasaporte" if _safe(family_ref.get("pasaporte")) and not _safe(family_ref.get("nif_nie")) else "nif_tie_nie_dni",
+            "nombre_apellidos": _safe(family_ref.get("nombre_apellidos")),
+            "primer_apellido": primer_apellido,
+            "segundo_apellido": second_last,
+            "nombre": nombre,
+        },
+        "domicilio": {},
+        "autoliquidacion": {"tipo": "principal", "num_justificante": "", "importe_complementaria": None},
+        "tramite": {},
+        "declarante": {},
+        "ingreso": {"forma_pago": "efectivo", "iban": ""},
+        "extra": {},
+        "captcha": {"manual": True},
+        "download": {"dir": "./downloads", "filename_prefix": "family_related"},
+    }
+    return normalize_payload_for_form(payload)
+
+
+def _merge_family_links(existing: list[dict[str, Any]], new_link: dict[str, Any]) -> list[dict[str, Any]]:
+    links: list[dict[str, Any]] = [x for x in existing if isinstance(x, dict)]
+    key = (
+        _safe(new_link.get("related_document_id")),
+        _safe(new_link.get("relation")),
+        _safe(new_link.get("document_number")),
+    )
+    for row in links:
+        row_key = (
+            _safe(row.get("related_document_id")),
+            _safe(row.get("relation")),
+            _safe(row.get("document_number")),
+        )
+        if row_key == key:
+            return links
+    links.append(new_link)
+    return links
+
+
+def _sync_family_reference(document_id: str, payload: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    family_ref = _family_reference_from_payload(payload)
+    if not family_ref:
+        return {"linked": False, "family_links": []}
+
+    family_payload = _build_family_payload(family_ref)
+    identity_keys = [v for v in [_safe(family_ref.get("nif_nie")), _safe(family_ref.get("pasaporte"))] if v]
+    linked_doc = CRM_REPO.find_latest_by_identities(identity_keys, exclude_document_id=document_id)
+    related_document_id = _safe((linked_doc or {}).get("document_id"))
+    created = False
+
+    if related_document_id:
+        existing_payload = (
+            linked_doc.get("effective_payload")
+            or linked_doc.get("edited_payload")
+            or linked_doc.get("ocr_payload")
+            or {}
+        )
+        if isinstance(existing_payload, dict):
+            merged_payload, applied, _ = _enrich_payload_fill_empty(
+                payload=existing_payload,
+                source_payload=family_payload,
+                source_document_id=document_id,
+            )
+            if applied:
+                CRM_REPO.save_edited_payload(
+                    document_id=related_document_id,
+                    payload=merged_payload,
+                    missing_fields=collect_validation_errors(merged_payload, require_tramite=False),
+                )
+    else:
+        related_document_id = uuid.uuid4().hex
+        created = True
+        CRM_REPO.upsert_from_upload(
+            document_id=related_document_id,
+            payload=family_payload,
+            ocr_document={},
+            source={
+                "source_kind": "family_reference_auto",
+                "origin_document_id": document_id,
+                "original_filename": _safe(source.get("original_filename")),
+                "stored_path": _safe(source.get("stored_path")),
+                "preview_url": _safe(source.get("preview_url")),
+            },
+            missing_fields=collect_validation_errors(family_payload, require_tramite=False),
+            manual_steps_required=["verify_filled_fields", "submit_or_download_manually"],
+            form_url=DEFAULT_TARGET_URL,
+            target_url=DEFAULT_TARGET_URL,
+        )
+
+    forward_link = {
+        "relation": "familiar_que_da_derecho",
+        "related_document_id": related_document_id,
+        "document_number": _safe(family_ref.get("document_number")),
+        "created_from_reference": created,
+    }
+    backward_link = {
+        "relation": "titular_familiar_dependiente",
+        "related_document_id": document_id,
+        "document_number": _safe(_identity_candidates(payload)[0] if _identity_candidates(payload) else ""),
+        "created_from_reference": False,
+    }
+
+    primary_doc = CRM_REPO.get_document(document_id) or {}
+    primary_links = _merge_family_links(primary_doc.get("family_links") or [], forward_link)
+    CRM_REPO.update_document_fields(document_id, {"family_links": primary_links})
+
+    if related_document_id:
+        related_doc = CRM_REPO.get_document(related_document_id) or {}
+        related_links = _merge_family_links(related_doc.get("family_links") or [], backward_link)
+        CRM_REPO.update_document_fields(related_document_id, {"family_links": related_links})
+
+    return {
+        "linked": True,
+        "related_document_id": related_document_id,
+        "created": created,
+        "family_links": primary_links,
+        "family_reference": family_ref,
+    }
+
+
 def _name_tokens(payload: dict[str, Any]) -> set[str]:
     parts = [
         _safe_payload_get(payload, "identificacion.primer_apellido"),
@@ -376,6 +543,8 @@ def _record_from_crm(document_id: str, crm_doc: dict[str, Any]) -> dict[str, Any
         "identity_source_document_id": crm_doc.get("identity_source_document_id") or "",
         "enrichment_preview": crm_doc.get("enrichment_preview") or [],
         "merge_candidates": crm_doc.get("merge_candidates") or [],
+        "family_links": crm_doc.get("family_links") or [],
+        "family_reference": crm_doc.get("family_reference") or {},
     }
 
 
@@ -606,8 +775,11 @@ def create_app() -> FastAPI:
         if not file.filename or not _allowed_suffix(file.filename):
             raise HTTPException(status_code=400, detail="Only .jpg/.jpeg/.png/.pdf are supported.")
         source_kind = _safe(source_kind).lower()
-        if source_kind not in {"anketa", "passport", "nie_tie", "visa"}:
-            raise HTTPException(status_code=422, detail="source_kind is required and must be one of: anketa, passport, nie_tie, visa")
+        if source_kind not in {"anketa", "fmiliar", "familiar", "passport", "nie_tie", "visa"}:
+            raise HTTPException(
+                status_code=422,
+                detail="source_kind is required and must be one of: anketa, fmiliar, passport, nie_tie, visa",
+            )
 
         document_id = uuid.uuid4().hex
         suffix = Path(file.filename).suffix.lower()
@@ -690,6 +862,8 @@ def create_app() -> FastAPI:
             "identity_source_document_id": "",
             "enrichment_preview": [],
             "merge_candidates": merge_candidates,
+            "family_links": [],
+            "family_reference": {},
         }
         _write_record(document_id, record)
         CRM_REPO.upsert_from_upload(
@@ -706,6 +880,18 @@ def create_app() -> FastAPI:
             enrichment_preview=list(record.get("enrichment_preview") or []),
             merge_candidates=merge_candidates,
         )
+        family_sync = _sync_family_reference(document_id, payload, record["source"])
+        if family_sync.get("linked"):
+            record["family_links"] = family_sync.get("family_links") or []
+            record["family_reference"] = family_sync.get("family_reference") or {}
+            _write_record(document_id, record)
+            CRM_REPO.update_document_fields(
+                document_id,
+                {
+                    "family_links": record["family_links"],
+                    "family_reference": record["family_reference"],
+                },
+            )
 
         return JSONResponse(
             {
@@ -722,6 +908,8 @@ def create_app() -> FastAPI:
                 "identity_source_document_id": _safe(record.get("identity_source_document_id")),
                 "enrichment_preview": list(record.get("enrichment_preview") or []),
                 "merge_candidates": merge_candidates,
+                "family_links": record.get("family_links") or [],
+                "family_reference": record.get("family_reference") or {},
             }
         )
 
@@ -759,6 +947,18 @@ def create_app() -> FastAPI:
             missing_fields=missing_fields,
         )
         CRM_REPO.update_document_fields(document_id, {"merge_candidates": merge_candidates})
+        family_sync = _sync_family_reference(document_id, payload, record.get("source") or {})
+        if family_sync.get("linked"):
+            record["family_links"] = family_sync.get("family_links") or []
+            record["family_reference"] = family_sync.get("family_reference") or {}
+            _write_record(document_id, record)
+            CRM_REPO.update_document_fields(
+                document_id,
+                {
+                    "family_links": record["family_links"],
+                    "family_reference": record["family_reference"],
+                },
+            )
         return JSONResponse(
             {
                 "document_id": document_id,
@@ -770,6 +970,8 @@ def create_app() -> FastAPI:
                 "identity_source_document_id": _safe(record.get("identity_source_document_id")),
                 "enrichment_preview": list(record.get("enrichment_preview") or []),
                 "merge_candidates": merge_candidates,
+                "family_links": record.get("family_links") or [],
+                "family_reference": record.get("family_reference") or {},
             }
         )
 

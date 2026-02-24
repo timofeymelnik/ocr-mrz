@@ -182,6 +182,8 @@ class CRMRepository:
             "enrichment_preview": enrichment_preview if enrichment_preview is not None else (existing.get("enrichment_preview") or []),
             "enrichment_log": existing.get("enrichment_log") or {},
             "merge_candidates": merge_candidates if merge_candidates is not None else (existing.get("merge_candidates") or []),
+            "family_links": existing.get("family_links") or [],
+            "family_reference": existing.get("family_reference") or {},
         }
         self._save(record)
         return record
@@ -216,6 +218,8 @@ class CRMRepository:
             "enrichment_preview": existing.get("enrichment_preview") or [],
             "enrichment_log": existing.get("enrichment_log") or {},
             "merge_candidates": existing.get("merge_candidates") or [],
+            "family_links": existing.get("family_links") or [],
+            "family_reference": existing.get("family_reference") or {},
         }
         self._save(record)
         return record

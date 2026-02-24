@@ -122,3 +122,73 @@ def test_build_tasa_document_extracts_visa_mrz_identity() -> None:
     assert card.get("fecha_nacimiento") == "12/08/2013"
     assert fields_790.get("numero") == ""
     assert fields_790.get("pasaporte") == "025585133"
+
+
+def test_build_tasa_document_treats_fmiliar_as_form_source() -> None:
+    ocr_text = "\n".join(
+        [
+            "SOLICITUD DE AUTORIZACION",
+            "CALLE MAYOR 15 28013 MADRID MADRID - ESP",
+        ]
+    )
+    document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="fmiliar")
+    fields_790 = document.get("form_790_012", {}).get("fields", {})
+
+    assert fields_790.get("tipo_via") == "Calle"
+    assert fields_790.get("nombre_via_publica") == "Mayor"
+    assert fields_790.get("numero") == "15"
+
+
+def test_build_tasa_document_extracts_mi_f_ds_tokens() -> None:
+    ident = MOCK_USER["identificacion"]
+    home = MOCK_USER["domicilio"]
+    extra = MOCK_USER["extra"]
+    nie = "X0000000T"
+    relative_passport = "TEST7654321"
+    relative_last_name = "RELATIVE"
+    relative_first_name = "PERSON"
+    ocr_text = "\n".join(
+        [
+            "MOVILIDAD INTERNACIONAL",
+            "MI-F",
+            f"DS_PASAP: {ident['pasaporte']}",
+            f"DS_NIE_1: {nie[0]}",
+            f"DS_NIE_2: {nie[1:8]}",
+            f"DS_NIE_3: {nie[8]}",
+            f"DS_APE1: {ident['primer_apellido']}",
+            f"DS_NOMBRE: {ident['nombre']}",
+            f"DS_DIA_NAC: {extra['fecha_nacimiento_dia']}",
+            f"DS_MES_NAC: {extra['fecha_nacimiento_mes']}",
+            f"DS_ANYO_NAC: {extra['fecha_nacimiento_anio']}",
+            f"DS_NACION: {extra['nacionalidad']}",
+            "DS_SEXO: H",
+            f"DS_DOMIC: {home['nombre_via']}",
+            f"DS_NUM: {home['numero']}",
+            f"DS_PISO: {home['piso']}",
+            f"DS_LOCAL: {home['municipio']}",
+            f"DS_CP: {home['cp']}",
+            f"DS_PROV: {home['provincia']}",
+            f"DS_TFNO_FIJO: {home['telefono']}",
+            f"DS_EMAIL: {extra['email']}",
+            f"DFD_PASAP: {relative_passport}",
+            f"DFD_APE1: {relative_last_name}",
+            f"DFD_NOMBRE: {relative_first_name}",
+        ]
+    )
+    document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="fmiliar")
+    card = document.get("card_extracted", {})
+    fields = document.get("form_mi_t", {}).get("fields", {})
+
+    assert card.get("nie_or_nif") == nie
+    assert card.get("pasaporte") == ident["pasaporte"]
+    assert card.get("apellidos") == ident["primer_apellido"]
+    assert card.get("nombre") == ident["nombre"]
+    assert card.get("fecha_nacimiento") == extra["fecha_nacimiento"]
+    familiar = card.get("familiar_que_da_derecho", {})
+    assert familiar.get("pasaporte") == relative_passport
+    assert familiar.get("apellidos") == relative_last_name
+    assert familiar.get("nombre") == relative_first_name
+    assert familiar.get("full_name") == f"{relative_last_name} {relative_first_name}"
+    assert fields.get("codigo_postal") == home["cp"]
+    assert fields.get("telefono") == home["telefono"]
+    assert fields.get("familiar_pasaporte") == relative_passport

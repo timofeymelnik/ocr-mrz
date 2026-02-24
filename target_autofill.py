@@ -157,6 +157,36 @@ def _compose_floor_door_token(piso: str, puerta: str) -> str:
     return piso_clean or puerta_clean
 
 
+def _normalize_door_token(value: str) -> str:
+    raw = _strip_extra_spaces(value).upper()
+    if not raw:
+        return ""
+    translit = {
+        "А": "A",
+        "В": "B",
+        "Е": "E",
+        "К": "K",
+        "М": "M",
+        "Н": "H",
+        "О": "O",
+        "Р": "P",
+        "С": "C",
+        "Т": "T",
+        "Х": "X",
+    }
+    return "".join(translit.get(ch, ch) for ch in raw)
+
+
+def _split_compact_floor_door(piso: str, puerta: str) -> tuple[str, str]:
+    piso_clean = _sanitize_floor_token(piso)
+    puerta_clean = _normalize_door_token(puerta)
+    if piso_clean and not puerta_clean:
+        compact = re.fullmatch(r"(\d{1,3})\s*([A-Z])", piso_clean.upper())
+        if compact:
+            return compact.group(1), compact.group(2)
+    return piso_clean, puerta_clean
+
+
 def _split_address_details(nombre_via: str) -> tuple[str, str, str, str, str]:
     """
     Try to extract trailing address detail tokens from street name:
@@ -277,6 +307,11 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
     explicit_apellido1 = _safe(payload, "identificacion", "primer_apellido")
     explicit_apellido2 = _safe(payload, "identificacion", "segundo_apellido")
     explicit_nombre = _safe(payload, "identificacion", "nombre")
+    normalized_nombre_apellidos = _strip_extra_spaces(
+        " ".join(x for x in [explicit_apellido1 or apellido1, explicit_apellido2 or apellido2, explicit_nombre or nombre] if x)
+    )
+    if not normalized_nombre_apellidos:
+        normalized_nombre_apellidos = _strip_extra_spaces(nombre_apellidos.replace(",", " "))
     tipo_via = _safe(payload, "domicilio", "tipo_via")
     raw_nombre_via = _safe(payload, "domicilio", "nombre_via")
     cleaned_nombre_via, inferred_numero, inferred_escalera, inferred_piso, inferred_puerta = _split_address_details(raw_nombre_via)
@@ -285,6 +320,7 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
     escalera = _safe(payload, "domicilio", "escalera") or inferred_escalera
     piso = _sanitize_floor_token(_safe(payload, "domicilio", "piso")) or inferred_piso
     puerta = _safe(payload, "domicilio", "puerta") or inferred_puerta
+    piso, puerta = _split_compact_floor_door(piso, puerta)
     piso_puerta = _compose_floor_door_token(piso, puerta)
     # Spanish forms usually split street line from number/floor/door fields.
     domicilio_en_espana = " ".join(x for x in [tipo_via, nombre_via] if x).strip()
@@ -310,7 +346,7 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
         "nif_nie_number": nie_number,
         "nif_nie_suffix": nie_suffix,
         "pasaporte": _safe(payload, "identificacion", "pasaporte"),
-        "nombre_apellidos": nombre_apellidos,
+        "nombre_apellidos": normalized_nombre_apellidos or nombre_apellidos,
         "primer_apellido": explicit_apellido1 or apellido1,
         "segundo_apellido": explicit_apellido2 or apellido2,
         "nombre": explicit_nombre or nombre,

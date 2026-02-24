@@ -127,6 +127,7 @@ def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("declarante", {})
     payload.setdefault("ingreso", {})
     payload.setdefault("extra", {})
+    payload.setdefault("referencias", {})
 
     ident = payload["identificacion"] if isinstance(payload["identificacion"], dict) else {}
     if not isinstance(payload["identificacion"], dict):
@@ -156,13 +157,12 @@ def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     if composed_birth:
         extra["fecha_nacimiento"] = composed_birth
 
-    if not str(decl.get("fecha", "") or "").strip():
-        decl["fecha"] = _today_ddmmyyyy()
-
-    d, m, y = _split_ddmmyyyy(str(decl.get("fecha", "") or ""))
-    decl["fecha_dia"] = str(decl.get("fecha_dia", "") or d)
-    decl["fecha_mes"] = str(decl.get("fecha_mes", "") or m)
-    decl["fecha_anio"] = str(decl.get("fecha_anio", "") or y)
+    # Business rule: declaration date is always "today".
+    decl["fecha"] = _today_ddmmyyyy()
+    d, m, y = _split_ddmmyyyy(decl["fecha"])
+    decl["fecha_dia"] = d
+    decl["fecha_mes"] = m
+    decl["fecha_anio"] = y
 
     d2, m2, y2 = _split_ddmmyyyy(str(extra.get("fecha_nacimiento", "") or ""))
     extra["fecha_nacimiento_dia"] = str(extra.get("fecha_nacimiento_dia", "") or d2)
@@ -297,6 +297,7 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
         municipio = str(fields.get("municipio", "") or "")
         localidad_declaracion = str(fields.get("localidad_declaracion", "") or "")
         card = payload.get("card_extracted") if isinstance(payload.get("card_extracted"), dict) else {}
+        card_familiar = card.get("familiar_que_da_derecho") if isinstance(card.get("familiar_que_da_derecho"), dict) else {}
         nombre_apellidos = (
             str(fields.get("apellidos_nombre_razon_social", "") or "")
             or str(fields.get("full_name", "") or "")
@@ -379,6 +380,26 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
                 "representante_documento": str(fields.get("representante_documento", "") or ""),
                 "titulo_representante": str(fields.get("titulo_representante", "") or ""),
                 "hijos_escolarizacion_espana": str(fields.get("hijos_escolarizacion_espana", "") or ""),
+            },
+            "referencias": {
+                "familiar_que_da_derecho": {
+                    "nif_nie": str(fields.get("familiar_nif_nie", "") or card_familiar.get("nie_or_nif", "") or ""),
+                    "pasaporte": str(fields.get("familiar_pasaporte", "") or card_familiar.get("pasaporte", "") or ""),
+                    "nombre_apellidos": (
+                        str(fields.get("familiar_full_name", "") or "")
+                        or str(card_familiar.get("full_name", "") or "")
+                        or " ".join(
+                            x
+                            for x in [
+                                str(fields.get("familiar_apellidos", "") or card_familiar.get("apellidos", "") or "").strip(),
+                                str(fields.get("familiar_nombre", "") or card_familiar.get("nombre", "") or "").strip(),
+                            ]
+                            if x
+                        )
+                    ),
+                    "primer_apellido": str(fields.get("familiar_apellidos", "") or card_familiar.get("apellidos", "") or ""),
+                    "nombre": str(fields.get("familiar_nombre", "") or card_familiar.get("nombre", "") or ""),
+                }
             },
             "captcha": payload.get("captcha") or {"manual": True},
             "download": payload.get("download") or {"dir": "./downloads", "filename_prefix": "tasa790_012"},

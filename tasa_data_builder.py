@@ -1055,45 +1055,71 @@ def _extract_birth_nationality(text: str) -> tuple[str, str]:
 
 def _extract_from_form_pdf_tokens(text: str) -> dict[str, str]:
     tokens = _extract_keyed_tokens(text)
-    if not any(k.startswith("DEX_") for k in tokens):
+    if not any(k.startswith("DEX_") or k.startswith("DS_") for k in tokens):
         return {}
-    sexo = _normalize_sex_code(_extract_checkbox_token_value(text, "DEX_SEXO", {"H", "M", "X"}))
-    estado_civil = _extract_checkbox_token_value(text, "DEX_EC", {"S", "C", "V", "D", "SP", "UH"})
+
+    def _token(*keys: str) -> str:
+        for k in keys:
+            v = tokens.get(k, "")
+            if _safe(v):
+                return v
+        return ""
+
+    sexo = _normalize_sex_code(
+        _extract_checkbox_token_value(text, "DEX_SEXO", {"H", "M", "X"})
+        or _extract_checkbox_token_value(text, "DS_SEXO", {"H", "M", "X"})
+    )
+    estado_civil = _extract_checkbox_token_value(text, "DEX_EC", {"S", "C", "V", "D", "SP", "UH"}) or _extract_checkbox_token_value(
+        text, "DS_EC", {"S", "C", "V", "D", "SP", "UH"}
+    )
     dex_nie_compact = _upper_compact(
         "".join(
             [
-                tokens.get("DEX_NIE1", ""),
-                tokens.get("DEX_NIE_2", ""),
-                tokens.get("DEX_NIE_3", ""),
+                _token("DEX_NIE1", "DS_NIE1", "DS_NIE_1"),
+                _token("DEX_NIE_2", "DS_NIE_2"),
+                _token("DEX_NIE_3", "DS_NIE_3"),
             ]
         )
     )
-    dex_nie_single = _upper_compact(tokens.get("DEX_NIE_2", ""))
+    dex_nie_single = _upper_compact(_token("DEX_NIE_2", "DS_NIE_2"))
     dex_nie = dex_nie_compact or dex_nie_single
     return {
-        "nie_or_nif": dex_nie or tokens.get("DR_DNI", ""),
-        "apellidos": tokens.get("DEX_APE1", ""),
-        "nombre": tokens.get("DEX_NOMBRE", ""),
+        "nie_or_nif": dex_nie or _token("DR_DNI", "DS_DNI"),
+        "apellidos": _token("DEX_APE1", "DS_APE1"),
+        "nombre": _token("DEX_NOMBRE", "DS_NOMBRE"),
         "fecha_nacimiento": _to_spanish_date(
-            f"{tokens.get('DEX_DIA_NAC','')}{tokens.get('DEX_MES_NAC','')}{tokens.get('DEX_ANYO_NAC','')}"
+            f"{_token('DEX_DIA_NAC', 'DS_DIA_NAC')}{_token('DEX_MES_NAC', 'DS_MES_NAC')}{_token('DEX_ANYO_NAC', 'DS_ANYO_NAC')}"
         ),
-        "nacionalidad": tokens.get("DEX_NACION", ""),
-        "lugar_nacimiento": tokens.get("DEX_LN", ""),
-        "nombre_padre": tokens.get("DEX_NP", ""),
-        "nombre_madre": tokens.get("DEX_NM", ""),
-        "domicilio": tokens.get("DEX_DOMIC", ""),
-        "numero": tokens.get("DEX_NUM", ""),
-        "piso": tokens.get("DEX_PISO", ""),
-        "municipio": tokens.get("DEX_LOCAL", ""),
-        "provincia": tokens.get("DEX_PROV", ""),
-        "codigo_postal": tokens.get("DEX_CP", ""),
-        "telefono": tokens.get("DEX_TFNO", ""),
-        "email": tokens.get("DEX_EMAIL", "") or tokens.get("DEX_MAIL", ""),
+        "nacionalidad": _token("DEX_NACION", "DS_NACION"),
+        "lugar_nacimiento": _token("DEX_LN", "DS_LN"),
+        "nombre_padre": _token("DEX_NP", "DS_NP"),
+        "nombre_madre": _token("DEX_NM", "DS_NM"),
+        "domicilio": _token("DEX_DOMIC", "DS_DOMIC"),
+        "numero": _token("DEX_NUM", "DS_NUM"),
+        "piso": _token("DEX_PISO", "DS_PISO"),
+        "municipio": _token("DEX_LOCAL", "DS_LOCAL"),
+        "provincia": _token("DEX_PROV", "DS_PROV"),
+        "codigo_postal": _token("DEX_CP", "DS_CP"),
+        "telefono": _token("DEX_TFNO", "DS_TFNO", "DS_TFNO_FIJO"),
+        "email": _token("DEX_EMAIL", "DEX_MAIL", "DS_EMAIL", "DS_MAIL"),
         "sexo": sexo,
         "estado_civil": estado_civil,
         "localidad_declaracion": tokens.get("FIR_PROV", ""),
         "fecha_declaracion": _compose_fecha_from_fir(tokens),
-        "pasaporte": tokens.get("DEX_PASA", ""),
+        "pasaporte": _token("DEX_PASA", "DS_PASAP"),
+        "familiar_nie_or_nif": _upper_compact(
+            "".join(
+                [
+                    _token("DFD_NIE1", "DFD_NIE_1"),
+                    _token("DFD_NIE_2"),
+                    _token("DFD_NIE_3"),
+                ]
+            )
+            or _token("DFD_NIE_2")
+        ),
+        "familiar_pasaporte": _token("DFD_PASAP"),
+        "familiar_apellidos": _token("DFD_APE1"),
+        "familiar_nombre": _token("DFD_NOMBRE"),
         "representante_apellidos": tokens.get("DR_APELLIDOS", ""),
         "representante_nombre": tokens.get("DR_NOMBRE", ""),
         "representante_dni": tokens.get("DR_DNI", ""),
@@ -1105,6 +1131,8 @@ def _extract_from_form_pdf_tokens(text: str) -> dict[str, str]:
 def _detect_form_kind(merged_upper: str, form_pdf: dict[str, str], tasa_code: str) -> str:
     if tasa_code and tasa_code.strip() and tasa_code.strip() != "790_012":
         return tasa_code.strip().lower()
+    if "MOVILIDAD INTERNACIONAL" in merged_upper or "MI-T" in merged_upper or "MI-F" in merged_upper:
+        return "mi_t"
     if form_pdf and (
         "MOVILIDAD INTERNACIONAL" in merged_upper
         or "MI-T" in merged_upper
@@ -1399,7 +1427,7 @@ def build_tasa_document(
     merged = "\n".join(x for x in [ocr_front, ocr_back] if x).strip()
     merged_upper = merged.upper()
     source_kind_norm = _safe(source_kind).lower() or "anketa"
-    is_form_source = source_kind_norm in {"anketa", "form", "formulario", "questionnaire"}
+    is_form_source = source_kind_norm in {"anketa", "fmiliar", "familiar", "form", "formulario", "questionnaire"}
     is_identity_source = source_kind_norm in {"passport", "nie_tie", "visa"}
     form_pdf = _extract_from_form_pdf_tokens(merged)
     visual_fields = _extract_visual_fields(merged)
@@ -1626,6 +1654,17 @@ def build_tasa_document(
     if not fields_790["telefono"] and visual_fields.get("telefono"):
         fields_790["telefono"] = _safe(visual_fields.get("telefono"))
 
+    familiar_ref = {
+        "nie_or_nif": _safe(overrides.get("familiar_nie_or_nif")) or _safe(form_pdf.get("familiar_nie_or_nif")),
+        "pasaporte": _safe(overrides.get("familiar_pasaporte")) or _safe(form_pdf.get("familiar_pasaporte")),
+        "apellidos": _safe(overrides.get("familiar_apellidos")) or _safe(form_pdf.get("familiar_apellidos")),
+        "nombre": _safe(overrides.get("familiar_nombre")) or _safe(form_pdf.get("familiar_nombre")),
+    }
+    familiar_ref["full_name"] = _clean_spaces(
+        _safe(overrides.get("familiar_full_name"))
+        or " ".join(x for x in [familiar_ref.get("apellidos", ""), familiar_ref.get("nombre", "")] if x)
+    )
+
     fields_mi_t = {
         "nif_nie": _safe(overrides.get("nif_nie")) or nie_or_nif,
         "pasaporte": _safe(overrides.get("pasaporte"))
@@ -1668,6 +1707,11 @@ def build_tasa_document(
         or _safe(form_pdf.get("representante_telefono")),
         "representante_email": _normalize_email(overrides.get("representante_email"))
         or _normalize_email(form_pdf.get("representante_email")),
+        "familiar_nif_nie": familiar_ref.get("nie_or_nif", ""),
+        "familiar_pasaporte": familiar_ref.get("pasaporte", ""),
+        "familiar_apellidos": familiar_ref.get("apellidos", ""),
+        "familiar_nombre": familiar_ref.get("nombre", ""),
+        "familiar_full_name": familiar_ref.get("full_name", ""),
     }
 
     form_kind = _detect_form_kind(merged_upper, form_pdf, tasa_code)
@@ -1746,6 +1790,8 @@ def build_tasa_document(
             "address_lines": address_lines,
         },
     }
+    if any(_safe(v) for v in familiar_ref.values()):
+        card_extracted["familiar_que_da_derecho"] = familiar_ref
 
     form_790_012 = {
         "fields": fields_790,

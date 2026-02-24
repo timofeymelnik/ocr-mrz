@@ -110,19 +110,45 @@ class FormMappingRepository:
             )
         return normalized
 
+    @staticmethod
+    def _sanitize_known_target_mappings(host: str, path: str, mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        h = (host or "").strip().lower()
+        p = (path or "").strip().lower().rstrip("/") or "/"
+        if not (h == "sede.policia.gob.es" and p == "/tasa790_012"):
+            return mappings
+        out: list[dict[str, Any]] = []
+        for item in mappings or []:
+            row = dict(item)
+            selector = str(row.get("selector") or "").lower()
+            key = str(row.get("canonical_key") or "")
+            if "input[name*=\"piso\" i]" in selector and key == "piso_puerta":
+                row["canonical_key"] = "piso"
+            if "input[name*=\"nombre\" i]" in selector and key == "nombre":
+                row["canonical_key"] = "nombre_apellidos"
+            out.append(row)
+        return out
+
     def get_latest_for_url(self, target_url: str) -> dict[str, Any] | None:
         host, path = _normalize_url_parts(target_url)
         if not host:
             return None
         if self._mongo_enabled and self._collection is not None:
             doc = self._collection.find_one({"host": host, "path": path}, {"_id": 0})
-            return dict(doc) if doc else None
+            if not doc:
+                return None
+            out = dict(doc)
+            out["mappings"] = self._sanitize_known_target_mappings(host, path, list(out.get("mappings") or []))
+            out["mappings_count"] = len(out["mappings"])
+            return out
 
         file_path = self._fallback_file(host, path)
         if not file_path.exists():
             return None
         try:
-            return json.loads(file_path.read_text(encoding="utf-8"))
+            out = json.loads(file_path.read_text(encoding="utf-8"))
+            out["mappings"] = self._sanitize_known_target_mappings(host, path, list(out.get("mappings") or []))
+            out["mappings_count"] = len(out["mappings"])
+            return out
         except Exception:
             LOGGER.exception("Failed reading local mapping template: %s", file_path)
             return None
@@ -148,6 +174,7 @@ class FormMappingRepository:
         _ = template_pdf_bytes
         now = _now_iso()
         normalized_mappings = self._normalize_mappings(mappings)
+        normalized_mappings = self._sanitize_known_target_mappings(host, path, normalized_mappings)
         template = {
             "host": host,
             "path": path,

@@ -19,7 +19,7 @@ import type {
 } from "@/lib/types";
 
 type Step = "upload" | "review" | "prepare" | "autofill";
-type UploadSourceKind = "" | "anketa" | "passport" | "nie_tie" | "visa";
+type UploadSourceKind = "" | "anketa" | "fmiliar" | "passport" | "nie_tie" | "visa";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 const CLIENT_AGENT_BASE = process.env.NEXT_PUBLIC_CLIENT_AGENT_BASE || "http://127.0.0.1:8787";
@@ -826,6 +826,7 @@ export default function HomePage() {
                 >
                   <option value="">-- выберите тип документа --</option>
                   <option value="anketa">Анкета</option>
+                  <option value="fmiliar">Анкета familiar</option>
                   <option value="passport">Паспорт</option>
                   <option value="nie_tie">NIE/TIE/DNI</option>
                   <option value="visa">Виза</option>

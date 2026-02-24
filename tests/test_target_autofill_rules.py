@@ -57,4 +57,23 @@ def test_build_value_map_ignores_noisy_floor_cp_value() -> None:
     payload["domicilio"]["puerta"] = ""
     values = build_autofill_value_map(payload)
     assert values["piso"] == ""
-    assert values["domicilio_en_espana"] == "Urbanizacion Conjunto Demo 8A 21"
+    assert values["domicilio_en_espana"] == "Urbanizacion Conjunto Demo"
+
+
+def test_build_value_map_normalizes_nombre_apellidos_without_comma() -> None:
+    payload = mock_payload()
+    payload["identificacion"]["nombre_apellidos"] = "EXAMPLE TESTER, ALFA"
+    payload["identificacion"]["primer_apellido"] = "EXAMPLE"
+    payload["identificacion"]["segundo_apellido"] = "TESTER"
+    payload["identificacion"]["nombre"] = "ALFA"
+    values = build_autofill_value_map(payload)
+    assert values["nombre_apellidos"] == "EXAMPLE TESTER ALFA"
+
+
+def test_build_value_map_splits_compact_floor_and_door() -> None:
+    payload = mock_payload()
+    payload["domicilio"]["piso"] = "5C"
+    payload["domicilio"]["puerta"] = ""
+    values = build_autofill_value_map(payload)
+    assert values["piso"] == "5"
+    assert values["puerta"] == "C"
