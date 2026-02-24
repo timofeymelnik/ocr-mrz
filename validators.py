@@ -7,6 +7,16 @@ from pathlib import Path
 from typing import Any
 
 _CONTROL_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE"
+_PHONE_RULES: dict[str, tuple[str, int, int]] = {
+    "ES": ("34", 9, 9),
+    "RU": ("7", 10, 10),
+    "FR": ("33", 9, 9),
+    "DE": ("49", 10, 11),
+    "IT": ("39", 9, 10),
+    "PT": ("351", 9, 9),
+    "PL": ("48", 9, 9),
+    "RO": ("40", 9, 9),
+}
 
 
 class ValidationError(ValueError):
@@ -435,6 +445,38 @@ def _validate_iban(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}", iban))
 
 
+def _validate_phone(value: str, country_iso: str = "") -> tuple[bool, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return True, ""
+    compact = re.sub(r"\s+", "", raw)
+    match_plus = re.fullmatch(r"\+(\d{1,3})(\d+)", compact)
+    iso = str(country_iso or "").strip().upper()
+    if iso in _PHONE_RULES:
+        code, min_digits, max_digits = _PHONE_RULES[iso]
+        if not match_plus:
+            return False, f"domicilio.telefono must start with +{code} for {iso}."
+        full_code = match_plus.group(1)
+        rest = match_plus.group(2)
+        if not full_code.startswith(code):
+            return False, f"domicilio.telefono must start with +{code} for {iso}."
+        local = f"{full_code[len(code):]}{rest}"
+        if len(local) < min_digits or len(local) > max_digits:
+            expected = f"{min_digits}" if min_digits == max_digits else f"{min_digits}-{max_digits}"
+            return False, f"domicilio.telefono for {iso} must have {expected} digits after country code."
+        return True, ""
+
+    digits_only = re.sub(r"\D", "", compact)
+    if match_plus:
+        local = match_plus.group(2)
+        if len(local) < 6 or len(local) > 12:
+            return False, "domicilio.telefono international number must have 6-12 digits after country code."
+        return True, ""
+    if len(digits_only) < 6 or len(digits_only) > 15:
+        return False, "domicilio.telefono must have 6-15 digits."
+    return True, ""
+
+
 def _pick(payload: dict[str, Any], *path: str) -> Any:
     node: Any = payload
     for key in path:
@@ -484,6 +526,12 @@ def collect_validation_issues(payload: dict[str, Any], *, require_tramite: bool 
     cp = str(_pick(payload, "domicilio", "cp") or "").strip()
     if cp and not re.fullmatch(r"\d{5}", cp):
         add("invalid_format", "domicilio.cp", "domicilio.cp must have exactly 5 digits.")
+
+    telefono = str(_pick(payload, "domicilio", "telefono") or "").strip()
+    telefono_country_iso = str(_pick(payload, "extra", "telefono_country_iso") or "").strip()
+    phone_valid, phone_error = _validate_phone(telefono, telefono_country_iso)
+    if not phone_valid:
+        add("invalid_format", "domicilio.telefono", phone_error)
 
     fecha = str(_pick(payload, "declarante", "fecha") or "").strip()
     if fecha and not _validate_date_ddmmyyyy(fecha):

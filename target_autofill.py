@@ -180,6 +180,12 @@ def _normalize_door_token(value: str) -> str:
 def _split_compact_floor_door(piso: str, puerta: str) -> tuple[str, str]:
     piso_clean = _sanitize_floor_token(piso)
     puerta_clean = _normalize_door_token(puerta)
+    if piso_clean and puerta_clean:
+        # If floor already contains the same door letter (e.g. "5C", "5 C", "5º C"),
+        # keep only numeric floor in piso and preserve door in puerta.
+        compact_with_door = re.fullmatch(r"(\d{1,3})\s*[ºª]?\s*([A-Z])", piso_clean.upper())
+        if compact_with_door and compact_with_door.group(2) == puerta_clean:
+            return compact_with_door.group(1), puerta_clean
     if piso_clean and not puerta_clean:
         compact = re.fullmatch(r"(\d{1,3})\s*([A-Z])", piso_clean.upper())
         if compact:
@@ -1368,6 +1374,18 @@ def _pdf_value_for_field(field_name: str, value_map: dict[str, str]) -> str:
     n = _norm_text(field_name)
     if not n:
         return ""
+    if "nombreyapellidosdeltitular" in n:
+        return _strip_extra_spaces(
+            " ".join(
+                x
+                for x in [
+                    value_map.get("nombre", ""),
+                    value_map.get("primer_apellido", ""),
+                    value_map.get("segundo_apellido", ""),
+                ]
+                if x
+            )
+        )
     if "piso" in n and "puert" in n:
         return value_map.get("piso_puerta", "") or value_map.get("piso", "") or value_map.get("puerta", "")
     if "pasaporte" in n or "passport" in n:
@@ -1679,17 +1697,111 @@ def _autofill_pdf_target(
             value_map,
         )
         context = _rule_context(value_map)
+        sexo_value = (value_map.get("sexo", "") or "").strip().upper()
+        sexo_fields = {
+            name
+            for name, meta in explicit_by_field.items()
+            if str(meta.get("key") or "").strip().lower() == "sexo"
+            and str(meta.get("field_kind") or "").strip().lower() in {"checkbox", "radio"}
+        }
+        estado_civil_fields = {
+            name
+            for name, meta in explicit_by_field.items()
+            if str(meta.get("key") or "").strip().lower() == "estado_civil"
+            and str(meta.get("field_kind") or "").strip().lower() in {"checkbox", "radio"}
+        }
+        if not sexo_fields or not estado_civil_fields:
+            detected_sexo_fields: set[str] = set()
+            detected_estado_fields: set[str] = set()
+            for p in doc:
+                for widget in p.widgets() or []:
+                    widget_type = str(getattr(widget, "field_type_string", "") or "").lower()
+                    if "check" not in widget_type:
+                        continue
+                    name = str((widget.field_name or "")).strip()
+                    upper_name = name.upper()
+                    if upper_name in {"H", "M", "CHKBOX"}:
+                        detected_sexo_fields.add(name)
+                    if upper_name in {"C", "V", "D", "SP", "CHKBOX-0"}:
+                        detected_estado_fields.add(name)
+            if not sexo_fields:
+                sexo_fields = detected_sexo_fields
+            if not estado_civil_fields:
+                estado_civil_fields = detected_estado_fields
+        estado_civil_value = (value_map.get("estado_civil", "") or "").strip().upper()
+        sexo_target_by_field: dict[str, bool] = {}
+        estado_target_by_field: dict[str, bool] = {}
+
+        def _build_checkbox_group_targets(
+            field_names: set[str],
+            logical_order: list[str],
+            selected_code: str,
+            *,
+            allow_two_state_sex_fallback: bool = False,
+        ) -> dict[str, bool]:
+            if not field_names:
+                return {}
+            positioned: list[tuple[str, float, float]] = []
+            for p in doc:
+                for widget in p.widgets() or []:
+                    fname = str((widget.field_name or "")).strip()
+                    if fname not in field_names:
+                        continue
+                    wtype = str(getattr(widget, "field_type_string", "") or "").lower()
+                    if "check" not in wtype:
+                        continue
+                    rect = widget.rect
+                    positioned.append((fname, float(rect.x0), float(rect.y0)))
+            if not positioned:
+                return {}
+            positioned.sort(key=lambda item: (item[2], item[1]))
+            # Keep only the first visual row if parser picks noisy duplicates on other rows.
+            first_row_y = positioned[0][2]
+            row = [item for item in positioned if abs(item[2] - first_row_y) <= 25.0]
+            row.sort(key=lambda item: item[1])
+            effective_order = logical_order
+            # Some official templates (e.g. EX-11) expose only two sexo checkboxes (H/M).
+            # In that case we must not shift by X and should map left->H, right->M.
+            if allow_two_state_sex_fallback and len(row) == 2 and len(logical_order) >= 2:
+                effective_order = ["H", "M"]
+            out: dict[str, bool] = {}
+            for idx, (fname, _, _) in enumerate(row):
+                if idx >= len(effective_order):
+                    break
+                out[fname] = selected_code == effective_order[idx]
+            return out
+
+        sexo_target_by_field = _build_checkbox_group_targets(
+            sexo_fields,
+            ["X", "H", "M"],
+            sexo_value,
+            allow_two_state_sex_fallback=True,
+        )
+        estado_civil_target = "SP" if estado_civil_value == "SP" else estado_civil_value
+        estado_target_by_field = _build_checkbox_group_targets(
+            estado_civil_fields,
+            ["S", "C", "V", "D", "SP"],
+            estado_civil_target,
+        )
 
         def _set_checkbox(widget, checked: bool) -> None:
+            on_state = "Yes"
             try:
-                widget.field_value = bool(checked)
+                if hasattr(widget, "on_state"):
+                    on_state = str(widget.on_state() or "Yes")
+            except Exception:
+                on_state = "Yes"
+            target_value = on_state if checked else "Off"
+            try:
+                # For many government PDFs, explicit export values ("Yes"/"Off")
+                # are more reliable than bool assignment for checkbox state.
+                widget.field_value = target_value
                 widget.update()
                 return
             except Exception:
                 pass
             try:
-                on_state = widget.on_state() if hasattr(widget, "on_state") else "Yes"
-                widget.field_value = on_state if checked else "Off"
+                widget.field_value = bool(checked)
                 widget.update()
             except Exception:
                 LOGGER.exception("Failed setting checkbox field '%s'", getattr(widget, "field_name", ""))
@@ -1711,6 +1823,22 @@ def _autofill_pdf_target(
                 if _should_ignore_pdf_mapping(field_name, mapped_key, mapped_source, widget_type):
                     mapped_key = ""
                 if "check" in widget_type:
+                    if field_name in sexo_fields:
+                        checked_value = sexo_target_by_field.get(field_name)
+                        if checked_value is None:
+                            checked_value = False
+                        _set_checkbox(w, checked_value)
+                        filled_count += 1
+                        touched_fields.append(field_name)
+                        continue
+                    if field_name in estado_civil_fields:
+                        checked_value = estado_target_by_field.get(field_name)
+                        if checked_value is None:
+                            checked_value = False
+                        _set_checkbox(w, checked_value)
+                        filled_count += 1
+                        touched_fields.append(field_name)
+                        continue
                     checked_value: bool | None = None
                     if field_kind in {"checkbox", "radio"}:
                         checked_value = _eval_checked_when(str(mapping_meta.get("checked_when") or ""), context)
@@ -1738,6 +1866,18 @@ def _autofill_pdf_target(
                         continue
                 if field_name in date_split_field_values:
                     value = date_split_field_values[field_name]
+                elif "nombreyapellidosdeltitular" in _norm_text(field_name):
+                    value = _strip_extra_spaces(
+                        " ".join(
+                            x
+                            for x in [
+                                value_map.get("nombre", ""),
+                                value_map.get("primer_apellido", ""),
+                                value_map.get("segundo_apellido", ""),
+                            ]
+                            if x
+                        )
+                    )
                 elif mapped_key in CANONICAL_FIELD_KEYS:
                     value = value_map.get(mapped_key, "")
                 else:
@@ -1766,6 +1906,19 @@ def _autofill_pdf_target(
                 except Exception:
                     LOGGER.exception("Failed setting PDF field '%s'", field_name)
 
+        if hasattr(doc, "need_appearances"):
+            try:
+                doc.need_appearances(True)
+            except Exception:
+                LOGGER.exception("Failed setting need_appearances on filled PDF.")
+        flatten_widgets = os.getenv("PDF_FLATTEN_WIDGETS", "0").strip().lower() not in {"0", "false", "no", "off"}
+        if flatten_widgets and hasattr(doc, "bake"):
+            try:
+                # Some viewers render checkbox appearances incorrectly even when
+                # /V values are correct. Baking widgets makes visual output stable.
+                doc.bake(annots=False, widgets=True)
+            except Exception:
+                LOGGER.exception("Failed baking widgets for filled PDF.")
         filled_pdf = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_filled.pdf"
         doc.save(str(filled_pdf))
 

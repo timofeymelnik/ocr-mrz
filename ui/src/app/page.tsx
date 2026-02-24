@@ -9,6 +9,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { extractAddressHints } from "@/lib/address";
+import { PHONE_COUNTRIES, composePhone, parsePhoneParts, type PhoneCountryIso, validatePhone } from "@/lib/phone";
 import type {
   AutofillPreviewResponse,
   EnrichByIdentityResponse,
@@ -55,6 +57,12 @@ function toUrl(path: string, base: string): string {
   if (!path) return "";
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
   return `${base}${path}`;
+}
+
+function isPdfTargetUrl(value: string): boolean {
+  const v = (value || "").trim().toLowerCase();
+  if (!v) return false;
+  return /\.pdf(?:$|\?)/i.test(v) || v.includes("/documents/d/") || v.includes("/documents/");
 }
 
 function ddmmyyyyToIso(value: string): string {
@@ -126,26 +134,6 @@ function composeNie(prefix: string, number: string, suffix: string): string {
   return "";
 }
 
-function parsePhoneParts(value: string): { countryCode: string; localNumber: string } {
-  const raw = (value || "").trim();
-  if (!raw) return { countryCode: "+34", localNumber: "" };
-  const compact = raw.replace(/\s+/g, "");
-  const withPlus = compact.match(/^\+(\d{1,3})(\d*)$/);
-  if (withPlus) {
-    return { countryCode: `+${withPlus[1]}`, localNumber: withPlus[2] || "" };
-  }
-  const digits = compact.replace(/\D/g, "");
-  return { countryCode: "+34", localNumber: digits };
-}
-
-function composePhone(countryCode: string, localNumber: string): string {
-  const ccDigits = (countryCode || "").replace(/\D/g, "").slice(0, 3);
-  const numDigits = (localNumber || "").replace(/\D/g, "").slice(0, 15);
-  if (ccDigits && numDigits) return `+${ccDigits}${numDigits}`;
-  if (numDigits) return numDigits;
-  return "";
-}
-
 async function readErrorResponse(resp: Response): Promise<string> {
   const text = await resp.text();
   if (!text) return `Request failed (${resp.status})`;
@@ -175,6 +163,7 @@ export default function HomePage() {
   const [browserCurrentUrl, setBrowserCurrentUrl] = useState("");
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [autofill, setAutofill] = useState<AutofillPreviewResponse | null>(null);
+  const [filledPdfNonce, setFilledPdfNonce] = useState(0);
   const [niePrefix, setNiePrefix] = useState("");
   const [nieNumber, setNieNumber] = useState("");
   const [nieSuffix, setNieSuffix] = useState("");
@@ -187,7 +176,7 @@ export default function HomePage() {
   const [fechaNacimientoDia, setFechaNacimientoDia] = useState("");
   const [fechaNacimientoMes, setFechaNacimientoMes] = useState("");
   const [fechaNacimientoAnio, setFechaNacimientoAnio] = useState("");
-  const [telefonoCountryCode, setTelefonoCountryCode] = useState("+34");
+  const [telefonoCountryIso, setTelefonoCountryIso] = useState<PhoneCountryIso>("ES");
   const [telefonoLocalNumber, setTelefonoLocalNumber] = useState("");
   const [savedDocs, setSavedDocs] = useState<SavedCrmDocument[]>([]);
   const [savedDocsFilter, setSavedDocsFilter] = useState("");
@@ -255,7 +244,7 @@ export default function HomePage() {
     setFechaNacimientoDia("");
     setFechaNacimientoMes("");
     setFechaNacimientoAnio("");
-    setTelefonoCountryCode("+34");
+    setTelefonoCountryIso("ES");
     setTelefonoLocalNumber("");
     setUploadSourceKind("");
     setMergeCandidates([]);
@@ -266,6 +255,18 @@ export default function HomePage() {
     setMergeLoading(false);
     setError("");
     setDragOver(false);
+  }
+
+  function goToPrepareForAnotherDocument() {
+    setAutofill(null);
+    setFormUrl("");
+    setTargetUrl("");
+    setTargetPresetKey("");
+    setBrowserSessionId("");
+    setBrowserSessionAlive(false);
+    setBrowserCurrentUrl("");
+    setError("");
+    setStep("prepare");
   }
 
   async function loadSavedDocuments(query: string) {
@@ -301,7 +302,7 @@ export default function HomePage() {
       setFechaNacimientoDia("");
       setFechaNacimientoMes("");
       setFechaNacimientoAnio("");
-      setTelefonoCountryCode("+34");
+      setTelefonoCountryIso("ES");
       setTelefonoLocalNumber("");
       return;
     }
@@ -323,7 +324,8 @@ export default function HomePage() {
     setFechaNacimientoMes((nextPayload.extra?.fecha_nacimiento_mes || birth.month || "").trim());
     setFechaNacimientoAnio((nextPayload.extra?.fecha_nacimiento_anio || birth.year || "").trim());
     const phone = parsePhoneParts(nextPayload.domicilio?.telefono || "");
-    setTelefonoCountryCode(phone.countryCode || "+34");
+    const explicitIso = ((nextPayload.extra?.telefono_country_iso || "").toUpperCase() as PhoneCountryIso) || phone.countryIso;
+    setTelefonoCountryIso(PHONE_COUNTRIES.some((item) => item.iso === explicitIso) ? explicitIso : phone.countryIso || "ES");
     setTelefonoLocalNumber(phone.localNumber || "");
   }
 
@@ -404,13 +406,36 @@ export default function HomePage() {
     if (composed) patchPayload("identificacion", "nif_nie", composed);
   }
 
-  function patchPhonePart(kind: "countryCode" | "localNumber", value: string) {
-    const nextCountry =
-      kind === "countryCode" ? `+${value.replace(/\D/g, "").slice(0, 3)}` : telefonoCountryCode;
+  function patchPhonePart(kind: "countryIso" | "localNumber", value: string) {
+    const nextCountry = kind === "countryIso" ? (value as PhoneCountryIso) : telefonoCountryIso;
     const nextLocal = kind === "localNumber" ? value.replace(/\D/g, "").slice(0, 15) : telefonoLocalNumber;
-    if (kind === "countryCode") setTelefonoCountryCode(nextCountry);
+    if (kind === "countryIso") setTelefonoCountryIso(nextCountry);
     if (kind === "localNumber") setTelefonoLocalNumber(nextLocal);
     patchPayload("domicilio", "telefono", composePhone(nextCountry, nextLocal));
+    patchExtra("telefono_country_iso", nextCountry);
+  }
+
+  function autofillAddressFromStreet() {
+    if (!payload) return;
+    const hints = extractAddressHints(payload.domicilio.nombre_via || "");
+    const hasHints = Boolean(hints.numero || hints.piso || hints.puerta || hints.cp || hints.municipio || hints.streetName);
+    if (!hasHints) {
+      setError("Не удалось извлечь подсказки из строки адреса.");
+      return;
+    }
+    const domicilio = payload.domicilio;
+    setPayload({
+      ...payload,
+      domicilio: {
+        ...domicilio,
+        nombre_via: domicilio.nombre_via || hints.streetName,
+        numero: domicilio.numero || hints.numero,
+        piso: domicilio.piso || hints.piso,
+        puerta: domicilio.puerta || hints.puerta,
+        cp: domicilio.cp || hints.cp,
+        municipio: domicilio.municipio || hints.municipio,
+      },
+    });
   }
 
   function patchSplitNameAndCompose(kind: "primer_apellido" | "segundo_apellido" | "nombre", value: string) {
@@ -542,6 +567,11 @@ export default function HomePage() {
 
   async function confirmData() {
     if (!payload || !documentId) return;
+    const phoneCheck = validatePhone(telefonoCountryIso, telefonoLocalNumber);
+    if (!phoneCheck.valid) {
+      setError(phoneCheck.message);
+      return;
+    }
     setSaving(true);
     setError("");
     try {
@@ -558,7 +588,7 @@ export default function HomePage() {
         },
         domicilio: {
           ...payload.domicilio,
-          telefono: composePhone(telefonoCountryCode, telefonoLocalNumber) || payload.domicilio.telefono,
+          telefono: composePhone(telefonoCountryIso, telefonoLocalNumber) || payload.domicilio.telefono,
         },
         declarante: {
           ...payload.declarante,
@@ -569,6 +599,7 @@ export default function HomePage() {
         },
         extra: {
           ...(payload.extra || {}),
+          telefono_country_iso: telefonoCountryIso,
           fecha_nacimiento:
             composeDdmmyyyy(fechaNacimientoDia, fechaNacimientoMes, fechaNacimientoAnio) ||
             payload.extra?.fecha_nacimiento ||
@@ -662,12 +693,15 @@ export default function HomePage() {
     }
   }
 
-  async function openManagedSession(targetUrlOverride?: string) {
-    if (!documentId) return;
+  async function openManagedSession(
+    targetUrlOverride?: string,
+    options?: { headless?: boolean; slowmo?: number },
+  ): Promise<{ session_id: string; current_url: string; target_url: string } | null> {
+    if (!documentId) return null;
     const resolvedTargetUrl = (targetUrlOverride ?? targetUrl).trim();
     if (!resolvedTargetUrl) {
       setError("Укажите адрес страницы или PDF.");
-      return;
+      return null;
     }
     setSaving(true);
     setError("");
@@ -677,8 +711,8 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_url: resolvedTargetUrl,
-          headless: false,
-          slowmo: 40,
+          headless: options?.headless ?? false,
+          slowmo: options?.slowmo ?? 40,
           timeout_ms: 30000,
         }),
       });
@@ -690,28 +724,48 @@ export default function HomePage() {
       setBrowserSessionAlive(Boolean(data.alive));
       setBrowserCurrentUrl(data.current_url || "");
       setTargetUrl(data.target_url || resolvedTargetUrl);
+      return {
+        session_id: data.session_id || "",
+        current_url: data.current_url || "",
+        target_url: data.target_url || resolvedTargetUrl,
+      };
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to open browser session");
+      return null;
     } finally {
       setSaving(false);
     }
   }
 
-  async function runAutofillFromManagedSession() {
-    if (!payload || !documentId) return;
-    if (!browserSessionId) {
+  async function runAutofillFromManagedSession(
+    sessionIdOverride?: string,
+    currentUrlOverride?: string,
+    openFilledPdfAfter = false,
+  ): Promise<string> {
+    if (!payload || !documentId) return "";
+    setAutofill(null);
+    setFilledPdfNonce(0);
+    const sessionId = sessionIdOverride || browserSessionId;
+    if (!sessionId) {
       setError("Сначала нажмите 'Перейти по адресу' и откройте управляемую сессию.");
-      return;
+      return "";
     }
     setSaving(true);
     setError("");
     try {
-      const stateResp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${browserSessionId}/state`);
-      if (!stateResp.ok) {
-        throw new Error(await readErrorResponse(stateResp));
+      let currentUrl = (currentUrlOverride || "").trim();
+      if (currentUrl === "about:blank") currentUrl = "";
+      if (!currentUrl) {
+        const stateResp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${sessionId}/state`);
+        if (!stateResp.ok) {
+          throw new Error(await readErrorResponse(stateResp));
+        }
+        const stateData = await stateResp.json();
+        currentUrl = stateData.current_url || targetUrl || formUrl;
       }
-      const stateData = await stateResp.json();
-      const currentUrl = stateData.current_url || targetUrl || formUrl;
+      if (currentUrl === "about:blank") {
+        currentUrl = (targetUrl || formUrl).trim();
+      }
       if (!currentUrl) {
         throw new Error("Current URL is empty in browser session.");
       }
@@ -730,7 +784,7 @@ export default function HomePage() {
       }
       const templateData = await templateResp.json();
 
-      const autoResp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${browserSessionId}/fill`, {
+      const autoResp = await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${sessionId}/fill`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -745,19 +799,55 @@ export default function HomePage() {
         throw new Error(await readErrorResponse(autoResp));
       }
       const autoData: AutofillPreviewResponse = await autoResp.json();
+      const filledPdfUrl = autoData.filled_pdf_url ? toUrl(autoData.filled_pdf_url, CLIENT_AGENT_BASE) : "";
       setAutofill({
         ...autoData,
-        filled_pdf_url: autoData.filled_pdf_url ? toUrl(autoData.filled_pdf_url, CLIENT_AGENT_BASE) : "",
+        filled_pdf_url: filledPdfUrl,
       });
+      setFilledPdfNonce(Date.now());
       setFormUrl(currentUrl);
       setBrowserCurrentUrl(currentUrl);
       setStep("autofill");
+      if (openFilledPdfAfter && filledPdfUrl) {
+        const sep = filledPdfUrl.includes("?") ? "&" : "?";
+        window.open(`${filledPdfUrl}${sep}v=${Date.now()}`, "_blank", "noopener,noreferrer");
+      }
+      return filledPdfUrl;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Autofill in opened browser session failed");
+      return "";
     } finally {
       setSaving(false);
     }
   }
+
+  async function downloadFilledPdfForPdfTarget() {
+    if (!targetUrl.trim()) {
+      setError("Укажите адрес страницы или PDF.");
+      return;
+    }
+    const opened = await openManagedSession(targetUrl.trim(), { headless: true, slowmo: 0 });
+    if (!opened?.session_id) return;
+    const currentUrl = opened.target_url || (opened.current_url === "about:blank" ? "" : opened.current_url) || targetUrl.trim();
+    const filledPdfUrl = await runAutofillFromManagedSession(opened.session_id, currentUrl, true);
+    if (!filledPdfUrl) {
+      setError("Заполненный PDF не был сформирован. Проверьте маппинг полей для этого документа.");
+    }
+    try {
+      await fetch(`${CLIENT_AGENT_BASE}/api/browser-session/${opened.session_id}/close`, {
+        method: "POST",
+      });
+    } catch {
+      // best-effort close
+    }
+    setBrowserSessionId("");
+    setBrowserSessionAlive(false);
+    setBrowserCurrentUrl("");
+  }
+
+  const phoneCountry = PHONE_COUNTRIES.find((item) => item.iso === telefonoCountryIso) || PHONE_COUNTRIES[0];
+  const phoneValidation = validatePhone(telefonoCountryIso, telefonoLocalNumber);
+  const isPdfTarget = isPdfTargetUrl(targetUrl);
 
   return (
     <main className="mx-auto min-h-screen max-w-[1400px] p-6">
@@ -768,7 +858,14 @@ export default function HomePage() {
             Загрузка документа, верификация данных, autofill полей заявителя и ручной handoff.
           </p>
         </div>
-        <Badge variant="secondary">{step.toUpperCase()}</Badge>
+        <div className="flex items-center gap-2">
+          {step !== "upload" ? (
+            <Button variant="secondary" onClick={resetWorkflow} disabled={saving || uploading}>
+              Начать сначала
+            </Button>
+          ) : null}
+          <Badge variant="secondary">{step.toUpperCase()}</Badge>
+        </div>
       </div>
 
       {error ? (
@@ -984,17 +1081,29 @@ export default function HomePage() {
 
               <section className="space-y-2">
                 <h3 className="text-sm font-semibold">Domicilio</h3>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div>
                     <Label>Tipo vía</Label>
                     <Input value={payload.domicilio.tipo_via} onChange={(e) => patchPayload("domicilio", "tipo_via", e.target.value)} />
                   </div>
-                  <div>
+                  <div className="md:col-span-2">
                     <Label>Nombre vía</Label>
-                    <Input
-                      value={payload.domicilio.nombre_via}
-                      onChange={(e) => patchPayload("domicilio", "nombre_via", e.target.value)}
-                    />
+                    <div className="mt-1 flex flex-col gap-2 md:flex-row">
+                      <Input
+                        className="md:flex-1"
+                        value={payload.domicilio.nombre_via}
+                        onChange={(e) => patchPayload("domicilio", "nombre_via", e.target.value)}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="md:w-auto"
+                        onClick={autofillAddressFromStreet}
+                      >
+                        Дозаполнить адрес из строки
+                      </Button>
+                    </div>
                   </div>
                   <div>
                     <Label>Número</Label>
@@ -1012,32 +1121,52 @@ export default function HomePage() {
                     <Label>Puerta</Label>
                     <Input value={payload.domicilio.puerta} onChange={(e) => patchPayload("domicilio", "puerta", e.target.value)} />
                   </div>
-                  <div>
+                  <div className="md:col-span-2">
                     <Label>Teléfono</Label>
-                    <div className="grid grid-cols-[110px_1fr] gap-2">
+                    <div className="mt-1 flex flex-col gap-2 md:flex-row">
+                      <select
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:w-[260px] md:flex-none"
+                        value={telefonoCountryIso}
+                        onChange={(e) => patchPhonePart("countryIso", e.target.value)}
+                      >
+                        {PHONE_COUNTRIES.map((item) => (
+                          <option key={item.iso} value={item.iso}>
+                            {item.flag} {item.iso} ({item.dialCode}) {item.label}
+                          </option>
+                        ))}
+                      </select>
                       <Input
-                        placeholder="+34"
-                        value={telefonoCountryCode}
-                        onChange={(e) => patchPhonePart("countryCode", e.target.value)}
-                      />
-                      <Input
-                        placeholder="624731544"
+                        className="md:flex-1"
+                        placeholder={phoneCountry.iso === "RU" ? "9123456789" : "624731544"}
                         value={telefonoLocalNumber}
                         onChange={(e) => patchPhonePart("localNumber", e.target.value)}
                       />
                     </div>
+                    <p className={`mt-1 text-xs ${phoneValidation.valid ? "text-muted-foreground" : "text-red-700"}`}>
+                      {phoneValidation.valid
+                        ? `Формат: ${phoneCountry.dialCode} + ${phoneCountry.minDigits === phoneCountry.maxDigits ? phoneCountry.minDigits : `${phoneCountry.minDigits}-${phoneCountry.maxDigits}`} цифр`
+                        : phoneValidation.message}
+                    </p>
                   </div>
-                  <div>
-                    <Label>Municipio</Label>
-                    <Input value={payload.domicilio.municipio} onChange={(e) => patchPayload("domicilio", "municipio", e.target.value)} />
-                  </div>
-                  <div>
-                    <Label>Provincia</Label>
-                    <Input value={payload.domicilio.provincia} onChange={(e) => patchPayload("domicilio", "provincia", e.target.value)} />
-                  </div>
-                  <div>
-                    <Label>CP</Label>
-                    <Input value={payload.domicilio.cp} onChange={(e) => patchPayload("domicilio", "cp", e.target.value)} />
+                  <div className="grid grid-cols-1 gap-2 md:col-span-2 md:grid-cols-3">
+                    <div>
+                      <Label>Municipio</Label>
+                      <Input
+                        value={payload.domicilio.municipio}
+                        onChange={(e) => patchPayload("domicilio", "municipio", e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>Provincia</Label>
+                      <Input
+                        value={payload.domicilio.provincia}
+                        onChange={(e) => patchPayload("domicilio", "provincia", e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>CP</Label>
+                      <Input value={payload.domicilio.cp} onChange={(e) => patchPayload("domicilio", "cp", e.target.value)} />
+                    </div>
                   </div>
                 </div>
               </section>
@@ -1203,7 +1332,7 @@ export default function HomePage() {
                 </div>
               </section>
 
-              <Button onClick={confirmData} disabled={saving}>
+              <Button onClick={confirmData} disabled={saving || !phoneValidation.valid}>
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
                 Подтвердить данные
               </Button>
@@ -1242,11 +1371,24 @@ export default function HomePage() {
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label>Адрес страницы/PDF</Label>
-                <Input
-                  placeholder="https://..."
-                  value={targetUrl}
-                  onChange={(e) => setTargetUrl(e.target.value)}
-                />
+                <div className="flex flex-col gap-2 md:flex-row">
+                  <Input
+                    className="md:flex-1"
+                    placeholder="https://..."
+                    value={targetUrl}
+                    onChange={(e) => setTargetUrl(e.target.value)}
+                  />
+                  {!isPdfTarget ? (
+                    <Button
+                      className="md:w-auto"
+                      onClick={() => void openManagedSession()}
+                      disabled={saving || !targetUrl.trim()}
+                    >
+                      {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                      Перейти по адресу
+                    </Button>
+                  ) : null}
+                </div>
               </div>
               <div className="space-y-2">
                 <Label>Быстрый выбор документа/тасы</Label>
@@ -1259,7 +1401,6 @@ export default function HomePage() {
                     const preset = TARGET_URL_PRESETS.find((item) => item.key === nextKey);
                     if (!preset) return;
                     setTargetUrl(preset.url);
-                    void openManagedSession(preset.url);
                   }}
                   disabled={saving}
                 >
@@ -1271,16 +1412,18 @@ export default function HomePage() {
                   ))}
                 </select>
               </div>
-              <Button onClick={() => void openManagedSession()} disabled={saving || !targetUrl.trim()}>
-                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Перейти по адресу (открыть управляемое окно)
-              </Button>
-              <Button onClick={runAutofillFromManagedSession} disabled={saving || !browserSessionId}>
+              <Button
+                onClick={() => {
+                  if (isPdfTarget) {
+                    void downloadFilledPdfForPdfTarget();
+                    return;
+                  }
+                  void runAutofillFromManagedSession();
+                }}
+                disabled={saving || !targetUrl.trim() || (!isPdfTarget && !browserSessionId)}
+              >
                 {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
-                Я готов, запустить заполнение данных
-              </Button>
-              <Button variant="secondary" onClick={resetWorkflow} disabled={saving}>
-                Начать сначала
+                {isPdfTarget ? "Скачать заполненный PDF" : "Заполнить, когда готов"}
               </Button>
             </CardContent>
           </Card>
@@ -1297,19 +1440,20 @@ export default function HomePage() {
             <CardContent className="space-y-4">
               {autofill.filled_pdf_url ? (
                 <Button asChild variant="outline">
-                  <a href={autofill.filled_pdf_url} target="_blank" rel="noreferrer">
+                  <a
+                    href={`${autofill.filled_pdf_url}${autofill.filled_pdf_url.includes("?") ? "&" : "?"}v=${filledPdfNonce || Date.now()}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
                     Открыть заполненный PDF
                   </a>
                 </Button>
               ) : null}
-              <Button asChild>
-                <a href={formUrl} target="_blank" rel="noreferrer">
-                  Открыть живую форму для Trámite/CAPTCHA/скачивания
-                </a>
-              </Button>
-              <Button variant="secondary" onClick={resetWorkflow} disabled={saving}>
-                Начать сначала
-              </Button>
+              <div className="flex flex-col gap-2 md:flex-row">
+                <Button variant="outline" onClick={goToPrepareForAnotherDocument} disabled={saving}>
+                  Заполнить другой документ
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>

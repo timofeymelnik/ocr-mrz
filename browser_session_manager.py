@@ -204,6 +204,7 @@ def _capture_template_debug_bundle(
 
 def _navigate_with_fallback(page: Page, target_url: str, timeout_ms: int) -> None:
     errors: list[str] = []
+    target_looks_like_pdf = _looks_like_pdf_url(target_url)
     for wait_until in ("domcontentloaded", "load", "commit"):
         try:
             page.goto(target_url, wait_until=wait_until, timeout=timeout_ms)
@@ -212,8 +213,10 @@ def _navigate_with_fallback(page: Page, target_url: str, timeout_ms: int) -> Non
             message = str(exc)
             errors.append(f"{wait_until}: {message}")
             # Some PDF/document navigations can throw ERR_ABORTED after redirect/download handoff.
-            # If navigation already changed URL, keep session alive and continue.
-            if "ERR_ABORTED" in message.upper() and page.url and page.url != "about:blank":
+            # Treat it as acceptable for PDF-like targets even when page.url stays about:blank.
+            if "ERR_ABORTED" in message.upper() and (
+                target_looks_like_pdf or (page.url and page.url != "about:blank")
+            ):
                 return
     raise RuntimeError(f"Load failed for URL: {target_url}. Attempts: {' | '.join(errors)}")
 

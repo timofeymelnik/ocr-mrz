@@ -44,6 +44,7 @@ export type Payload = {
   };
   extra?: {
     email?: string;
+    telefono_country_iso?: string;
     fecha_nacimiento?: string;
     fecha_nacimiento_dia?: string;
     fecha_nacimiento_mes?: string;
