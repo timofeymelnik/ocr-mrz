@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -13,17 +12,28 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from crm_repository import CRMRepository
-from form_mapping_repository import FormMappingRepository
-from ocr import VisionOCRClient
-from pipeline_runner import attach_pipeline_metadata, stage_start, stage_success
-from browser_session_manager import (
+from app.crm.router import create_crm_router
+from app.crm.service import CRMService, build_record_from_crm
+from app.documents.upload_service import UploadService
+from app.documents.router import create_documents_router
+from app.documents.service import DocumentsService
+from app.browser.session_lifecycle_service import BrowserSessionLifecycleService
+from app.auth.middleware import create_auth_middleware
+from app.auth.repository import AuthRepository
+from app.auth.router import create_auth_router
+from app.auth.service import AuthService
+from app.core.config import AppConfig
+from app.crm.repository import CRMRepository
+from app.mappings.repository import FormMappingRepository
+from app.ocr_extract.ocr import VisionOCRClient
+from app.pipeline.runner import attach_pipeline_metadata, stage_start, stage_success
+from app.browser.session_manager import (
     close_browser_session,
     collect_browser_session_placeholder_mappings,
     fill_browser_session,
@@ -31,19 +41,19 @@ from browser_session_manager import (
     inspect_browser_session_fields,
     open_browser_session,
 )
-from tasa_data_builder import build_tasa_document
-from target_autofill import (
+from app.data_builder.data_builder import build_tasa_document
+from app.autofill.target_autofill import (
     CANONICAL_FIELD_KEYS,
     extract_pdf_placeholder_mappings_from_bytes,
     inspect_pdf_fields_from_bytes,
     should_save_artifact_screenshots_on_error,
     suggest_mappings_for_fields,
 )
-from pdf_validation import validate_filled_pdf_against_mapping
-from validators import collect_validation_errors, collect_validation_issues, normalize_payload_for_form
+from app.core.validators import collect_validation_errors, collect_validation_issues, normalize_payload_for_form
 
 load_dotenv()
 LOGGER = logging.getLogger(__name__)
+APP_CONFIG = AppConfig.from_env()
 
 APP_ROOT = Path(__file__).resolve().parent
 RUNTIME_DIR = APP_ROOT / "runtime"
@@ -57,10 +67,6 @@ CRM_REPO = CRMRepository(APP_ROOT)
 FORM_MAPPING_REPO = FormMappingRepository(APP_ROOT)
 _BROWSER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright-sync")
 DEFAULT_TARGET_URL = ""
-
-
-class ConfirmRequest(BaseModel):
-    payload: dict[str, Any]
 
 
 class BrowserSessionOpenRequest(BaseModel):
@@ -105,11 +111,6 @@ class BrowserSessionUploadMapperRequest(BaseModel):
 class AutofillValidateRequest(BaseModel):
     filled_pdf_url: str | None = None
     filled_pdf_path: str | None = None
-
-
-class EnrichByIdentityRequest(BaseModel):
-    apply: bool = True
-    source_document_id: str | None = None
 
 
 def _safe(value: Any) -> str:
@@ -520,34 +521,6 @@ async def _run_browser_call(fn, *args, **kwargs):
     return await loop.run_in_executor(_BROWSER_EXECUTOR, call)
 
 
-def _record_from_crm(document_id: str, crm_doc: dict[str, Any]) -> dict[str, Any]:
-    payload = (
-        crm_doc.get("effective_payload")
-        or crm_doc.get("edited_payload")
-        or crm_doc.get("ocr_payload")
-        or {}
-    )
-    source = crm_doc.get("source") or {}
-    return {
-        "document_id": document_id,
-        "preview_url": source.get("preview_url") or "",
-        "source": source,
-        "document": crm_doc.get("ocr_document") or {},
-        "payload": payload,
-        "missing_fields": crm_doc.get("missing_fields") or [],
-        "manual_steps_required": crm_doc.get("manual_steps_required") or ["verify_filled_fields", "submit_or_download_manually"],
-        "form_url": crm_doc.get("form_url") or DEFAULT_TARGET_URL,
-        "target_url": crm_doc.get("target_url") or DEFAULT_TARGET_URL,
-        "browser_session_id": crm_doc.get("browser_session_id") or "",
-        "identity_match_found": bool(crm_doc.get("identity_match_found")),
-        "identity_source_document_id": crm_doc.get("identity_source_document_id") or "",
-        "enrichment_preview": crm_doc.get("enrichment_preview") or [],
-        "merge_candidates": crm_doc.get("merge_candidates") or [],
-        "family_links": crm_doc.get("family_links") or [],
-        "family_reference": crm_doc.get("family_reference") or {},
-    }
-
-
 def create_app() -> FastAPI:
     app = FastAPI(title="OCR Tasa UI API", version="1.0.0")
     app.add_middleware(
@@ -558,6 +531,22 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.mount("/runtime", StaticFiles(directory=str(RUNTIME_DIR)), name="runtime")
+    auth_repo = AuthRepository(APP_ROOT)
+    auth_service = AuthService(auth_repo, APP_CONFIG.auth)
+    auth_service.bootstrap_admin_user()
+    app.include_router(create_auth_router(auth_service))
+    app.middleware("http")(create_auth_middleware(auth_service))
+    crm_service = CRMService(
+        repo=CRM_REPO,
+        default_target_url=DEFAULT_TARGET_URL,
+        safe_value=_safe,
+        read_record=_read_record,
+        run_browser_call=_run_browser_call,
+        close_browser_session=close_browser_session,
+        record_path=_record_path,
+        logger=LOGGER,
+    )
+    app.include_router(create_crm_router(service=crm_service))
 
     def read_or_bootstrap_record(document_id: str) -> dict[str, Any]:
         try:
@@ -568,7 +557,7 @@ def create_app() -> FastAPI:
             crm_doc = CRM_REPO.get_document(document_id)
             if not crm_doc:
                 raise
-            record = _record_from_crm(document_id, crm_doc)
+            record = build_record_from_crm(document_id, crm_doc, DEFAULT_TARGET_URL)
             _write_record(document_id, record)
             return record
 
@@ -681,6 +670,67 @@ def create_app() -> FastAPI:
             "payload": enriched,
         }
 
+    documents_service = DocumentsService(
+        crm_repo=CRM_REPO,
+        read_or_bootstrap_record=read_or_bootstrap_record,
+        write_record=_write_record,
+        merge_candidates_for_payload=lambda document_id, payload, limit: _merge_candidates_for_payload(
+            document_id, payload, limit=limit
+        ),
+        collect_validation_errors=lambda payload, require_tramite: collect_validation_errors(
+            payload, require_tramite=require_tramite
+        ),
+        collect_validation_issues=lambda payload, require_tramite: collect_validation_issues(
+            payload, require_tramite=require_tramite
+        ),
+        sync_family_reference=_sync_family_reference,
+        enrich_record_payload_by_identity=lambda document_id, payload, persist, source_document_id: enrich_record_payload_by_identity(
+            document_id,
+            payload,
+            persist=persist,
+            source_document_id=source_document_id,
+        ),
+        safe_value=_safe,
+    )
+    app.include_router(create_documents_router(service=documents_service))
+    upload_service = UploadService(
+        uploads_dir=UPLOADS_DIR,
+        default_target_url=DEFAULT_TARGET_URL,
+        crm_repo=CRM_REPO,
+        safe_value=_safe,
+        runtime_url=_runtime_url,
+        allowed_suffix=_allowed_suffix,
+        write_record=_write_record,
+        merge_candidates_for_payload=lambda document_id, payload, limit: _merge_candidates_for_payload(
+            document_id, payload, limit=limit
+        ),
+        collect_validation_errors=lambda payload, require_tramite: collect_validation_errors(
+            payload, require_tramite=require_tramite
+        ),
+        collect_validation_issues=lambda payload, require_tramite: collect_validation_issues(
+            payload, require_tramite=require_tramite
+        ),
+        build_tasa_document=build_tasa_document,
+        normalize_payload_for_form=normalize_payload_for_form,
+        attach_pipeline_metadata=attach_pipeline_metadata,
+        stage_start=stage_start,
+        stage_success=stage_success,
+        create_ocr_client=VisionOCRClient,
+        sync_family_reference=_sync_family_reference,
+    )
+    browser_lifecycle_service = BrowserSessionLifecycleService(
+        default_target_url=DEFAULT_TARGET_URL,
+        read_or_bootstrap_record=read_or_bootstrap_record,
+        write_record=_write_record,
+        safe_value=_safe,
+        run_browser_call=_run_browser_call,
+        open_browser_session=open_browser_session,
+        get_browser_session_state=get_browser_session_state,
+        close_browser_session=close_browser_session,
+        crm_repo=CRM_REPO,
+        logger_exception=LOGGER.exception,
+    )
+
     def attach_template_artifacts_to_record(record: dict[str, Any], template: dict[str, Any]) -> None:
         document = record.get("document")
         if not isinstance(document, dict):
@@ -718,369 +768,34 @@ def create_app() -> FastAPI:
         LOGGER.info("disabled endpoint called: /api/documents/{document_id}/browser-session/mapping/import-template-pdf")
         raise HTTPException(status_code=404, detail="Mapper endpoints are disabled. Templates are managed manually via files.")
 
-    @app.get("/api/crm/documents")
-    def list_crm_documents(
-        query: str = Query(default="", alias="query"),
-        limit: int = Query(default=30, ge=1, le=200, alias="limit"),
-    ) -> JSONResponse:
-        items = CRM_REPO.search_documents(query=query, limit=limit)
-        return JSONResponse({"items": items})
-
-    @app.get("/api/crm/documents/{document_id}")
-    def get_crm_document(document_id: str) -> JSONResponse:
-        crm_doc = CRM_REPO.get_document(document_id)
-        if not crm_doc:
-            raise HTTPException(status_code=404, detail=f"CRM document not found: {document_id}")
-        record = _record_from_crm(document_id, crm_doc)
-        return JSONResponse(record)
-
-    @app.delete("/api/crm/documents/{document_id}")
-    async def delete_crm_document(document_id: str) -> JSONResponse:
-        crm_doc = CRM_REPO.get_document(document_id)
-        if not crm_doc:
-            raise HTTPException(status_code=404, detail=f"CRM document not found: {document_id}")
-
-        session_id = _safe(crm_doc.get("browser_session_id"))
-        if not session_id:
-            try:
-                local_record = _read_record(document_id)
-                session_id = _safe(local_record.get("browser_session_id"))
-            except HTTPException:
-                session_id = ""
-        if session_id:
-            try:
-                await _run_browser_call(close_browser_session, session_id)
-            except Exception:
-                LOGGER.exception("Failed closing browser session during CRM delete: %s", session_id)
-
-        deleted = CRM_REPO.delete_document(document_id)
-        if not deleted:
-            raise HTTPException(status_code=500, detail=f"Failed deleting CRM document: {document_id}")
-
-        record_path = _record_path(document_id)
-        if record_path.exists():
-            try:
-                record_path.unlink()
-            except Exception:
-                LOGGER.exception("Failed deleting local document record: %s", record_path)
-
-        return JSONResponse({"document_id": document_id, "deleted": True})
-
     @app.post("/api/documents/upload")
     async def upload_document(
         file: UploadFile = File(...),
         tasa_code: str = Form(default="790_012"),
         source_kind: str = Form(...),
     ) -> JSONResponse:
-        if not file.filename or not _allowed_suffix(file.filename):
-            raise HTTPException(status_code=400, detail="Only .jpg/.jpeg/.png/.pdf are supported.")
-        source_kind = _safe(source_kind).lower()
-        if source_kind not in {"anketa", "fmiliar", "familiar", "passport", "nie_tie", "visa"}:
-            raise HTTPException(
-                status_code=422,
-                detail="source_kind is required and must be one of: anketa, fmiliar, passport, nie_tie, visa",
-            )
-
-        document_id = uuid.uuid4().hex
-        suffix = Path(file.filename).suffix.lower()
-        stored_name = f"{document_id}{suffix}"
-        upload_path = UPLOADS_DIR / stored_name
-
-        with upload_path.open("wb") as fh:
-            shutil.copyfileobj(file.file, fh)
-
-        ocr_client = VisionOCRClient()
-        google_maps_api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip() or os.getenv(
-            "GOOGLE_CLOUD_VISION_API_KEY", ""
-        ).strip()
-
-        ocr_started = stage_start()
-        ocr_result = ocr_client.extract_text(upload_path)
-        ocr_stage = stage_success(
-            "ocr",
-            ocr_started,
-            details={
-                "source": _safe(getattr(ocr_result, "ocr_source", "live")) or "live",
-                "used_cached_ocr": False,
-                "pages": len(ocr_result.pages),
-            },
-        )
-
-        parse_started = stage_start()
-        document = build_tasa_document(
-            ocr_front=ocr_result.full_text,
-            ocr_back="",
-            user_overrides={},
-            geocode_candidates=None,
-            google_maps_api_key=google_maps_api_key,
+        payload = await upload_service.upload_document(
+            file=file,
             tasa_code=tasa_code,
-            source_file=file.filename,
             source_kind=source_kind,
         )
-        parse_stage = stage_success(
-            "parse_extract_map",
-            parse_started,
-            details={"forms_available": sorted((document.get("forms") or {}).keys())},
-        )
-        crm_stage = stage_success("crm_mapping", stage_start())
-        document = attach_pipeline_metadata(
-            document=document,
-            source_files=[file.filename],
-            ocr_details={
-                "front_text_len": len(ocr_result.full_text or ""),
-                "back_text_len": 0,
-                "used_cached_ocr": False,
-                "source": _safe(getattr(ocr_result, "ocr_source", "live")) or "live",
-            },
-            parse_stage=parse_stage,
-            crm_stage=crm_stage,
-            ocr_stage=ocr_stage,
-        )
-
-        payload = normalize_payload_for_form(document)
-        merge_candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
-        missing_fields = collect_validation_errors(payload, require_tramite=False)
-        validation_issues = collect_validation_issues(payload, require_tramite=False)
-
-        record = {
-            "document_id": document_id,
-            "tasa_code": tasa_code,
-            "source": {
-                "original_filename": file.filename,
-                "stored_path": str(upload_path),
-                "preview_url": _runtime_url(upload_path),
-                "source_kind": source_kind,
-            },
-            "document": document,
-            "payload": payload,
-            "missing_fields": missing_fields,
-            "validation_issues": validation_issues,
-            "manual_steps_required": ["verify_filled_fields", "submit_or_download_manually"],
-            "form_url": DEFAULT_TARGET_URL,
-            "target_url": DEFAULT_TARGET_URL,
-            "identity_match_found": False,
-            "identity_source_document_id": "",
-            "enrichment_preview": [],
-            "merge_candidates": merge_candidates,
-            "family_links": [],
-            "family_reference": {},
-        }
-        _write_record(document_id, record)
-        CRM_REPO.upsert_from_upload(
-            document_id=document_id,
-            payload=payload,
-            ocr_document=document,
-            source=record["source"],
-            missing_fields=missing_fields,
-            manual_steps_required=record["manual_steps_required"],
-            form_url=DEFAULT_TARGET_URL,
-            target_url=DEFAULT_TARGET_URL,
-            identity_match_found=bool(record.get("identity_match_found")),
-            identity_source_document_id=_safe(record.get("identity_source_document_id")),
-            enrichment_preview=list(record.get("enrichment_preview") or []),
-            merge_candidates=merge_candidates,
-        )
-        family_sync = _sync_family_reference(document_id, payload, record["source"])
-        if family_sync.get("linked"):
-            record["family_links"] = family_sync.get("family_links") or []
-            record["family_reference"] = family_sync.get("family_reference") or {}
-            _write_record(document_id, record)
-            CRM_REPO.update_document_fields(
-                document_id,
-                {
-                    "family_links": record["family_links"],
-                    "family_reference": record["family_reference"],
-                },
-            )
-
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "preview_url": record["source"]["preview_url"],
-                "form_url": DEFAULT_TARGET_URL,
-                "target_url": DEFAULT_TARGET_URL,
-                "payload": payload,
-                "document": document,
-                "missing_fields": missing_fields,
-                "validation_issues": validation_issues,
-                "manual_steps_required": record["manual_steps_required"],
-                "identity_match_found": bool(record.get("identity_match_found")),
-                "identity_source_document_id": _safe(record.get("identity_source_document_id")),
-                "enrichment_preview": list(record.get("enrichment_preview") or []),
-                "merge_candidates": merge_candidates,
-                "family_links": record.get("family_links") or [],
-                "family_reference": record.get("family_reference") or {},
-            }
-        )
-
-    @app.get("/api/documents/{document_id}")
-    def get_document(document_id: str) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        return JSONResponse(record)
-
-    @app.get("/api/documents/{document_id}/merge-candidates")
-    def get_merge_candidates(document_id: str) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        payload = record.get("payload") or {}
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=422, detail="Invalid payload in document record.")
-        candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
-        record["merge_candidates"] = candidates
-        _write_record(document_id, record)
-        CRM_REPO.update_document_fields(document_id, {"merge_candidates": candidates})
-        return JSONResponse({"document_id": document_id, "merge_candidates": candidates})
-
-    @app.post("/api/documents/{document_id}/confirm")
-    def confirm_document(document_id: str, req: ConfirmRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        payload = req.payload
-        merge_candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
-        missing_fields = collect_validation_errors(payload, require_tramite=False)
-        validation_issues = collect_validation_issues(payload, require_tramite=False)
-        record["payload"] = payload
-        record["missing_fields"] = missing_fields
-        record["merge_candidates"] = merge_candidates
-        _write_record(document_id, record)
-        CRM_REPO.save_edited_payload(
-            document_id=document_id,
-            payload=payload,
-            missing_fields=missing_fields,
-        )
-        CRM_REPO.update_document_fields(document_id, {"merge_candidates": merge_candidates})
-        family_sync = _sync_family_reference(document_id, payload, record.get("source") or {})
-        if family_sync.get("linked"):
-            record["family_links"] = family_sync.get("family_links") or []
-            record["family_reference"] = family_sync.get("family_reference") or {}
-            _write_record(document_id, record)
-            CRM_REPO.update_document_fields(
-                document_id,
-                {
-                    "family_links": record["family_links"],
-                    "family_reference": record["family_reference"],
-                },
-            )
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "missing_fields": missing_fields,
-                "validation_issues": validation_issues,
-                "payload": payload,
-                "manual_steps_required": record.get("manual_steps_required", []),
-                "identity_match_found": bool(record.get("identity_match_found")),
-                "identity_source_document_id": _safe(record.get("identity_source_document_id")),
-                "enrichment_preview": list(record.get("enrichment_preview") or []),
-                "merge_candidates": merge_candidates,
-                "family_links": record.get("family_links") or [],
-                "family_reference": record.get("family_reference") or {},
-            }
-        )
-
-    @app.post("/api/documents/{document_id}/enrich-by-identity")
-    def enrich_by_identity(document_id: str, req: EnrichByIdentityRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        payload = record.get("payload") or {}
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=422, detail="Invalid payload in document record.")
-
-        enrichment = enrich_record_payload_by_identity(
-            document_id,
-            payload,
-            persist=bool(req.apply),
-            source_document_id=_safe(req.source_document_id),
-        )
-        enriched_payload = enrichment.get("payload") if isinstance(enrichment.get("payload"), dict) else payload
-        missing_fields = collect_validation_errors(enriched_payload, require_tramite=False)
-        validation_issues = collect_validation_issues(enriched_payload, require_tramite=False)
-
-        if not req.apply:
-            merge_candidates = _merge_candidates_for_payload(document_id, payload, limit=10)
-            return JSONResponse(
-                {
-                    "document_id": document_id,
-                    "identity_match_found": bool(enrichment.get("identity_match_found")),
-                    "identity_source_document_id": _safe(enrichment.get("identity_source_document_id")),
-                    "identity_key": _safe(enrichment.get("identity_key")),
-                    "applied_fields": enrichment.get("applied_fields", []),
-                    "skipped_fields": enrichment.get("skipped_fields", []),
-                    "enrichment_preview": enrichment.get("enrichment_preview", []),
-                    "merge_candidates": merge_candidates,
-                    "missing_fields": collect_validation_errors(payload, require_tramite=False),
-                    "validation_issues": collect_validation_issues(payload, require_tramite=False),
-                    "payload": payload,
-                }
-            )
-
-        merge_candidates = _merge_candidates_for_payload(document_id, enriched_payload, limit=10)
-        updated_record = read_or_bootstrap_record(document_id)
-        updated_record["merge_candidates"] = merge_candidates
-        _write_record(document_id, updated_record)
-        CRM_REPO.update_document_fields(document_id, {"merge_candidates": merge_candidates})
-
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "identity_match_found": bool(enrichment.get("identity_match_found")),
-                "identity_source_document_id": _safe(enrichment.get("identity_source_document_id")),
-                "identity_key": _safe(enrichment.get("identity_key")),
-                "applied_fields": enrichment.get("applied_fields", []),
-                "skipped_fields": enrichment.get("skipped_fields", []),
-                "enrichment_preview": enrichment.get("enrichment_preview", []),
-                "merge_candidates": merge_candidates,
-                "missing_fields": missing_fields,
-                "validation_issues": validation_issues,
-                "payload": enriched_payload,
-            }
-        )
+        return JSONResponse(payload)
 
     @app.post("/api/documents/{document_id}/browser-session/open")
     async def open_managed_browser_session(document_id: str, req: BrowserSessionOpenRequest) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        target_url = (req.target_url or record.get("target_url") or record.get("form_url") or DEFAULT_TARGET_URL).strip()
-        if not target_url:
-            raise HTTPException(status_code=422, detail="Target URL is required.")
-        prev_session_id = _safe(record.get("browser_session_id"))
-        if prev_session_id:
-            try:
-                await _run_browser_call(close_browser_session, prev_session_id)
-            except Exception:
-                LOGGER.exception("Failed closing previous browser session: %s", prev_session_id)
-        session = await _run_browser_call(
-            open_browser_session,
-            target_url,
+        payload = await browser_lifecycle_service.open_session(
+            document_id=document_id,
+            target_url=req.target_url,
             headless=req.headless,
             slowmo=req.slowmo,
             timeout_ms=req.timeout_ms,
         )
-        record["target_url"] = target_url
-        record["browser_session_id"] = session["session_id"]
-        _write_record(document_id, record)
-        CRM_REPO.set_browser_session(document_id, session["session_id"])
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                "session_id": session["session_id"],
-                "target_url": target_url,
-                "current_url": session.get("current_url", ""),
-                "alive": bool(session.get("alive", True)),
-            }
-        )
+        return JSONResponse(payload)
 
     @app.get("/api/documents/{document_id}/browser-session/state")
     async def browser_session_state(document_id: str) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if not session_id:
-            raise HTTPException(status_code=404, detail="Browser session is not opened.")
-        try:
-            state = await _run_browser_call(get_browser_session_state, session_id)
-        except Exception as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return JSONResponse(
-            {
-                "document_id": document_id,
-                **state,
-            }
-        )
+        payload = await browser_lifecycle_service.get_state(document_id=document_id)
+        return JSONResponse(payload)
 
     @app.post("/api/documents/{document_id}/browser-session/fields/analyze")
     async def analyze_browser_session_fields(document_id: str, req: BrowserSessionAnalyzeRequest) -> JSONResponse:
@@ -1342,17 +1057,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/documents/{document_id}/browser-session/close")
     async def close_managed_browser_session(document_id: str) -> JSONResponse:
-        record = read_or_bootstrap_record(document_id)
-        session_id = _safe(record.get("browser_session_id"))
-        if session_id:
-            try:
-                await _run_browser_call(close_browser_session, session_id)
-            except Exception:
-                LOGGER.exception("Failed closing browser session: %s", session_id)
-        record["browser_session_id"] = ""
-        _write_record(document_id, record)
-        CRM_REPO.set_browser_session(document_id, "")
-        return JSONResponse({"document_id": document_id, "status": "closed"})
+        payload = await browser_lifecycle_service.close_session(document_id=document_id)
+        return JSONResponse(payload)
 
     return app
 

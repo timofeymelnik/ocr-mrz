@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tasa_data_builder import _expand_abbrev, _parse_address_parts, _postal_tipo_via_aliases
+from app.data_builder.data_builder import _expand_abbrev, _parse_address_parts, _postal_tipo_via_aliases
 
 
 def test_expand_abbrev_supports_urb() -> None:

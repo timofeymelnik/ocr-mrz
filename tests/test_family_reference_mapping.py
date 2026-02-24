@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tasa_data_builder import build_tasa_document
-from validators import normalize_payload_for_form
+from app.data_builder.data_builder import build_tasa_document
+from app.core.validators import normalize_payload_for_form
 from tests.mock_user import MOCK_USER
 
 

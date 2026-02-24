@@ -9,8 +9,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from form_filler import fetch_tramite_catalog, fill_for_manual_handoff
-from validators import ValidationError, collect_validation_errors, load_input_payload, validate_payload
+from app.autofill.form_filler import fetch_tramite_catalog, fill_for_manual_handoff
+from app.core.validators import ValidationError, collect_validation_errors, load_input_payload, validate_payload
 
 FALLBACK_TRAMITE_CATALOG = [
     {

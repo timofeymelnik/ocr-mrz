@@ -4,155 +4,40 @@ import json
 import os
 import re
 import uuid
-from functools import lru_cache
-from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any
 
-from geocoding import fetch_geocode_candidates
-from mrz_parser import parse_mrz_lines
-from validators import normalize_date, validate_spanish_document_number
-
-REQUIRED_FIELDS_790_012 = [
-    "nif_nie",
-    "apellidos_nombre_razon_social",
-    "tipo_via",
-    "nombre_via_publica",
-    "numero",
-    "municipio",
-    "provincia",
-    "codigo_postal",
-    "localidad_declaracion",
-    "fecha",
-    "forma_pago",
-]
-
-REQUIRED_FIELDS_MI_T = [
-    "nif_nie",
-    "apellidos",
-    "nombre",
-]
-
-REQUIRED_FIELDS_VISUAL_GENERIC: list[str] = []
-
-ADDRESS_ABBREVIATIONS = {
-    "C": "Calle",
-    "CL": "Calle",
-    "AV": "Avenida",
-    "AVDA": "Avenida",
-    "PZ": "Plaza",
-    "PL": "Plaza",
-    "PS": "Paseo",
-    "PSO": "Paseo",
-    "CR": "Carretera",
-    "CTRA": "Carretera",
-    "CM": "Camino",
-    "CMNO": "Camino",
-    "TR": "Travesia",
-    "TRV": "Travesia",
-    "URB": "Urbanizacion",
-    "PJE": "Pasaje",
-    "PJ": "Pasaje",
-    "GL": "Glorieta",
-    "GTA": "Glorieta",
-    "POL": "Poligono",
-    "PG": "Poligono",
-    "RDA": "Ronda",
-    "BARR": "Barrio",
-    "BAR": "Barrio",
-    "PB": "Planta Baja",
-    "PBJ": "Planta Baja",
-    "BJ": "Bajo",
-    "ENT": "Entresuelo",
-    "PRAL": "Principal",
-    "PISO": "Piso",
-    "PTA": "Puerta",
-    "IZQ": "Izquierda",
-    "DCHA": "Derecha",
-    "ESC": "Escalera",
-}
-
-TIPO_VIA_CANONICAL = {
-    "CALLE",
-    "AVENIDA",
-    "PLAZA",
-    "PASEO",
-    "PASAJE",
-    "CARRETERA",
-    "CAMINO",
-    "TRAVESIA",
-    "URBANIZACION",
-    "GLORIETA",
-    "RONDA",
-    "POLIGONO",
-    "BARRIO",
-    "AUTOPISTA",
-    "AUTOVIA",
-    "CUESTA",
-    "RAMBLA",
-    "SENDA",
-    "VEREDA",
-}
-
-
-def _norm_tipo_token(value: str) -> str:
-    v = (value or "").upper()
-    v = re.sub(r"[ÁÀÂÄ]", "A", v)
-    v = re.sub(r"[ÉÈÊË]", "E", v)
-    v = re.sub(r"[ÍÌÎÏ]", "I", v)
-    v = re.sub(r"[ÓÒÔÖ]", "O", v)
-    v = re.sub(r"[ÚÙÛÜ]", "U", v)
-    v = v.replace("Ñ", "N")
-    v = re.sub(r"[^A-Z0-9]+", "", v)
-    return v
-
-
-TIPO_VIA_CANONICAL_NORM = {_norm_tipo_token(x) for x in TIPO_VIA_CANONICAL}
-
-
-@lru_cache(maxsize=1)
-def _postal_tipo_via_aliases() -> dict[str, str]:
-    """
-    Optional extension point for postal catalogs.
-    Expected JSON formats:
-    1) {"URB": "URBANIZACION", "CT": "CARRETERA"}
-    2) {"aliases": {"URB": "URBANIZACION", ...}}
-    """
-    default_path = Path("runtime/catalogs/postal_street_types_es.json")
-    configured = os.getenv("POSTAL_STREET_TYPE_DICT_PATH", "").strip()
-    path = Path(configured) if configured else default_path
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    src = raw.get("aliases") if isinstance(raw, dict) and isinstance(raw.get("aliases"), dict) else raw
-    if not isinstance(src, dict):
-        return {}
-    out: dict[str, str] = {}
-    for alias, canonical in src.items():
-        a = _norm_tipo_token(str(alias))
-        c = _norm_tipo_token(str(canonical))
-        if a and c:
-            out[a] = c
-    return out
-
-MONTHS_ES = {
-    "enero": "01",
-    "febrero": "02",
-    "marzo": "03",
-    "abril": "04",
-    "mayo": "05",
-    "junio": "06",
-    "julio": "07",
-    "agosto": "08",
-    "septiembre": "09",
-    "setiembre": "09",
-    "octubre": "10",
-    "noviembre": "11",
-    "diciembre": "12",
-}
+from app.core.validators import normalize_date, validate_spanish_document_number
+from app.data_builder.address_parser import (
+    expand_abbrev as _address_expand_abbrev,
+    parse_address_parts as _address_parse_address_parts,
+)
+from app.data_builder.constants import (
+    ADDRESS_ABBREVIATIONS,
+    MONTHS_ES,
+    REQUIRED_FIELDS_790_012,
+    REQUIRED_FIELDS_MI_T,
+    REQUIRED_FIELDS_VISUAL_GENERIC,
+    postal_tipo_via_aliases as _postal_tipo_via_aliases,
+)
+from app.data_builder.geocoding import fetch_geocode_candidates
+from app.data_builder.mrz_parser import parse_mrz_lines
+from app.data_builder.normalizers import (
+    clean_address_freeform as _clean_address_freeform,
+    clean_spaces as _clean_spaces,
+    cleanup_nameish as _cleanup_nameish,
+    contains_cyrillic as _contains_cyrillic,
+    is_invalid_place_of_birth as _is_invalid_place_of_birth,
+    is_labelish_fragment as _is_labelish_fragment,
+    normalize_document_sex_code as _normalize_document_sex_code,
+    normalize_email as _normalize_email,
+    normalize_nationality as _normalize_nationality,
+    normalize_puerta as _normalize_puerta,
+    normalize_sex_code as _normalize_sex_code,
+    to_spanish_date as _to_spanish_date,
+    transliterate_ru as _transliterate_ru,
+    upper_compact as _upper_compact,
+)
 
 
 def _now_iso() -> str:
@@ -163,257 +48,6 @@ def _safe(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def _clean_spaces(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip())
-
-
-def _upper_compact(value: str) -> str:
-    return re.sub(r"\s+", "", (value or "")).upper()
-
-
-def _contains_cyrillic(value: str) -> bool:
-    return bool(re.search(r"[А-Яа-яЁё]", value or ""))
-
-
-_RU_TO_LAT = {
-    "А": "A",
-    "Б": "B",
-    "В": "V",
-    "Г": "G",
-    "Д": "D",
-    "Е": "E",
-    "Ё": "E",
-    "Ж": "ZH",
-    "З": "Z",
-    "И": "I",
-    "Й": "I",
-    "К": "K",
-    "Л": "L",
-    "М": "M",
-    "Н": "N",
-    "О": "O",
-    "П": "P",
-    "Р": "R",
-    "С": "S",
-    "Т": "T",
-    "У": "U",
-    "Ф": "F",
-    "Х": "KH",
-    "Ц": "TS",
-    "Ч": "CH",
-    "Ш": "SH",
-    "Щ": "SHCH",
-    "Ъ": "",
-    "Ы": "Y",
-    "Ь": "",
-    "Э": "E",
-    "Ю": "YU",
-    "Я": "YA",
-}
-
-
-def _transliterate_ru(value: str) -> str:
-    raw = str(value or "")
-    if not raw:
-        return ""
-    out: list[str] = []
-    for ch in raw:
-        up = ch.upper()
-        if up in _RU_TO_LAT:
-            repl = _RU_TO_LAT[up]
-            if ch.islower():
-                repl = repl.lower()
-            out.append(repl)
-        else:
-            out.append(ch)
-    return _clean_spaces("".join(out))
-
-
-def _cleanup_nameish(value: str) -> str:
-    v = _clean_spaces(str(value or ""))
-    if not v:
-        return ""
-    v = re.sub(r"\s*/\s*$", "", v)
-    v = re.sub(r"^\s*/\s*", "", v)
-    return _clean_spaces(v)
-
-
-def _normalize_sex_code(value: str) -> str:
-    v = _upper_compact(value)
-    if not v:
-        return ""
-    if v in {"H", "M", "X"}:
-        return v
-    if v in {"F", "FEMALE", "WOMAN", "MUJER"}:
-        return "M"
-    if v in {"MALE", "MAN", "HOMBRE"}:
-        return "H"
-    return ""
-
-
-def _normalize_document_sex_code(value: str) -> str:
-    """
-    Normalization for identity documents (passport/visa MRZ conventions):
-    - F/female/mujer -> M (Mujer)
-    - M/male/hombre -> H (Hombre)
-    """
-    v = _upper_compact(value)
-    if not v:
-        return ""
-    if v in {"F", "FEMALE", "WOMAN", "MUJER"}:
-        return "M"
-    if v in {"M", "MALE", "MAN", "HOMBRE"}:
-        return "H"
-    if v == "X":
-        return "X"
-    if v in {"H"}:
-        return "H"
-    return ""
-
-
-def _normalize_puerta(value: str) -> str:
-    v = _clean_spaces(value)
-    if not v:
-        return ""
-    if re.fullmatch(r"\d+", v):
-        return str(int(v))
-    return v
-
-
-def _normalize_email(value: Any) -> str:
-    email = _clean_spaces(_safe(value)).lower()
-    if not email:
-        return ""
-    if re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", email):
-        return email
-    return ""
-
-
-def _to_spanish_date(value: str) -> str:
-    v = _clean_spaces(value)
-    if not v:
-        return ""
-    if re.fullmatch(r"\d{2}/\d{2}/\d{4}", v):
-        return v
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
-        return f"{v[8:10]}/{v[5:7]}/{v[0:4]}"
-    iso = normalize_date(re.sub(r"[^0-9]", "", v))
-    if iso and re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso):
-        return f"{iso[8:10]}/{iso[5:7]}/{iso[0:4]}"
-    return ""
-
-
-def _normalize_nationality(value: str) -> str:
-    raw = _clean_spaces(value)
-    if not raw:
-        return ""
-    # Nationality cannot be a date or numeric token.
-    if _to_spanish_date(raw):
-        return ""
-    if re.search(r"\d", raw):
-        return ""
-    letters = re.sub(r"[^A-ZÁÉÍÓÚÑÜ ]", "", raw.upper())
-    letters = _clean_spaces(letters)
-    if not letters:
-        return ""
-    # Keep ISO-3 uppercase; keep demonyms/country text uppercased as-is.
-    return letters
-
-
-def _clean_address_freeform(value: str) -> str:
-    v = _clean_spaces(value)
-    if not v:
-        return ""
-    # Remove frequent leading OCR labels that pollute parsing.
-    v = re.sub(r"^(?:OBSERVACIONES/REMARKS\s+)+", "", v, flags=re.I)
-    v = re.sub(r"^(?:DOMICILIO/ADDRESS\s+)+", "", v, flags=re.I)
-    return _clean_spaces(v)
-
-
-def _is_labelish_fragment(value: str) -> bool:
-    v = _clean_spaces(value).upper()
-    if not v:
-        return True
-    tokens = {t for t in re.findall(r"[A-ZÁÉÍÓÚÑÜ]+", v)}
-    label_tokens = {
-        "NOMBRE",
-        "NAME",
-        "APELLIDO",
-        "APELLIDOS",
-        "SURNAME",
-        "SURNAMES",
-        "NACIONALIDAD",
-        "NATIONALITY",
-        "DOMICILIO",
-        "DOMICILI",
-        "ADDRESS",
-        "DIRECCION",
-        "DIRECCIÓN",
-        "MUNICIPIO",
-        "LOCALIDAD",
-        "PROVINCIA",
-        "CODIGO",
-        "CÓDIGO",
-        "POSTAL",
-        "DOCUMENTO",
-        "DOCUMENT",
-        "PASAPORTE",
-        "PASSPORT",
-        "LUGAR",
-        "NACIMIENTO",
-        "LLOC",
-        "NAIXEMENT",
-        "CITY",
-        "BIRTH",
-        "COUNTRY",
-        "PAIS",
-        "COGNOMS",
-        "NOM",
-    }
-    if tokens and tokens.issubset(label_tokens):
-        return True
-    if re.fullmatch(r"[*\-_/.: ]+", v):
-        return True
-    if "/" in v and len(tokens) <= 5 and any(t in label_tokens for t in tokens):
-        return True
-    noisy_phrases = [
-        "LUGAR DE NACIMIENTO",
-        "CIUDAD DE NACIMIENTO",
-        "DATOS DEL",
-        "HIJO",
-        "MADRE",
-        "PADRE",
-    ]
-    if any(p in v for p in noisy_phrases):
-        return True
-    return False
-
-
-def _is_invalid_place_of_birth(value: str) -> bool:
-    v = _clean_spaces(value)
-    if not v:
-        return True
-    up = v.upper()
-    compact = _upper_compact(v)
-    if re.fullmatch(r"(?:X/)?[MFX]", compact):
-        return True
-    if _to_spanish_date(v):
-        return True
-    blocked = [
-        "УЧЕТНАЯ ЗАПИС",
-        "UCHETNAYA ZAPIS",
-        "ACCOUNT",
-        "PLACE OF BIRT",
-        "PLACE OF BIRTH",
-        "CITY OF BIRTH",
-    ]
-    if any(token in up for token in blocked):
-        return True
-    if _is_labelish_fragment(v):
-        return True
-    return False
 
 
 def _extract_labeled_value(lines: list[str], labels: list[str]) -> str:
@@ -1205,93 +839,11 @@ def _address_candidate_lines(text: str) -> list[str]:
 
 
 def _expand_abbrev(address: str) -> tuple[str, list[dict[str, str]]]:
-    expanded = address
-    used: list[dict[str, str]] = []
-    for short, full in ADDRESS_ABBREVIATIONS.items():
-        pattern = rf"\b{re.escape(short)}\b"
-        if re.search(pattern, expanded, flags=re.I):
-            expanded = re.sub(pattern, full, expanded, flags=re.I)
-            used.append({"abbr": short, "expanded": full})
-    return _clean_spaces(expanded), used
+    return _address_expand_abbrev(address)
 
 
 def _parse_address_parts(address: str, overrides: dict[str, Any]) -> dict[str, str]:
-    fields = {
-        "tipo_via": _safe(overrides.get("tipo_via")),
-        "nombre_via_publica": _safe(overrides.get("nombre_via_publica")),
-        "numero": _safe(overrides.get("numero")),
-        "escalera": _safe(overrides.get("escalera")),
-        "piso": _safe(overrides.get("piso")),
-        "puerta": _safe(overrides.get("puerta")),
-        "municipio": _safe(overrides.get("municipio")),
-        "provincia": _safe(overrides.get("provincia")),
-        "codigo_postal": _safe(overrides.get("codigo_postal")),
-    }
-    if not address:
-        return fields
-
-    up = address.upper()
-    type_match = re.match(r"^\s*([A-ZÁÉÍÓÚÑÜ]+)\b", up)
-    if type_match and not fields["tipo_via"]:
-        token = type_match.group(1)
-        token_norm = _norm_tipo_token(token)
-        alias_map = _postal_tipo_via_aliases()
-        canonical_norm = alias_map.get(token_norm) or token_norm
-        if canonical_norm in TIPO_VIA_CANONICAL_NORM:
-            pretty = next((x for x in TIPO_VIA_CANONICAL if _norm_tipo_token(x) == canonical_norm), canonical_norm)
-            fields["tipo_via"] = pretty.title()
-
-    if fields["tipo_via"] and not fields["nombre_via_publica"]:
-        # Allow punctuation after tipo via (e.g. "CALLE. PORTUGAL").
-        # Try canonical token and original token (for alias-mapped prefixes like RBLA -> RAMBLA).
-        candidates = [fields["tipo_via"].upper()]
-        if type_match:
-            candidates.append(type_match.group(1))
-        for token in candidates:
-            m = re.search(re.escape(token) + r"[.\s]+([^,\d]+)", up)
-            if m:
-                fields["nombre_via_publica"] = _clean_spaces(m.group(1)).title()
-                break
-
-    if not fields["numero"]:
-        m = re.search(r"\b(\d{1,5}[A-Z]?)\b", up)
-        if m:
-            fields["numero"] = m.group(1)
-
-    if not fields["codigo_postal"]:
-        m = re.search(r"\b(\d{5})\b", up)
-        if m:
-            fields["codigo_postal"] = m.group(1)
-
-    if not fields["municipio"] or not fields["provincia"]:
-        m = re.search(r"\b([A-ZÁÉÍÓÚÑÜ]{3,})\s+([A-ZÁÉÍÓÚÑÜ]{3,})\s*-\s*ESP\b", up)
-        if m:
-            if not fields["municipio"]:
-                fields["municipio"] = m.group(1).title()
-            if not fields["provincia"]:
-                fields["provincia"] = m.group(2).title()
-
-    if not fields["piso"]:
-        m = re.search(r"\bPLANTA\s+([A-Z0-9]+)\b", up)
-        if m:
-            fields["piso"] = m.group(1)
-    if not fields["puerta"]:
-        m = re.search(r"\bPUERTA\s+([A-Z0-9]+)\b", up)
-        if m:
-            fields["puerta"] = m.group(1)
-
-    # OCR DNI often carries "P01 0017" after street number.
-    if not fields["piso"] or not fields["puerta"]:
-        m = re.search(r"\bP\s*0?(\d{1,2})\s+(\d{2,5}[A-Z]?)\b", up)
-        if m:
-            if not fields["piso"]:
-                fields["piso"] = m.group(1)
-            if not fields["puerta"]:
-                fields["puerta"] = m.group(2)
-
-    fields["puerta"] = _normalize_puerta(fields["puerta"])
-
-    return fields
+    return _address_parse_address_parts(address, overrides)
 
 
 def _extract_city_province_from_address_lines(address_lines: list[str]) -> tuple[str, str]:

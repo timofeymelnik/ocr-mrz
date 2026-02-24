@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from form_mapping_repository import FormMappingRepository
+from app.mappings.repository import FormMappingRepository
 
 
 def test_single_latest_template_replaces_previous(tmp_path: Path, monkeypatch) -> None:

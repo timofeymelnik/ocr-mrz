@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ocr import VisionOCRClient
+from app.ocr_extract.ocr import VisionOCRClient
 
 
 def test_dedup_lines_and_merge_pages() -> None:

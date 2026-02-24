@@ -14,8 +14,8 @@ from typing import Any
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 
-from form_filler import DEFAULT_CHROME_UA
-from target_autofill import (
+from app.autofill.form_filler import DEFAULT_CHROME_UA
+from app.autofill.target_autofill import (
     CANONICAL_FIELD_KEYS,
     autofill_existing_html_page,
     autofill_target_preview,

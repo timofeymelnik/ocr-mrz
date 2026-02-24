@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from browser_session_manager import (
+from app.browser.session_manager import (
     close_browser_session,
     fill_browser_session,
     get_browser_session_state,

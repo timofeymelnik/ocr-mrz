@@ -9,10 +9,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from json_store import append_documents_jsonl
-from ocr import VisionOCRClient
-from pipeline_runner import attach_pipeline_metadata, stage_failed, stage_start, stage_success
-from tasa_data_builder import build_tasa_document
+from app.io.json_store import append_documents_jsonl
+from app.ocr_extract.ocr import VisionOCRClient
+from app.pipeline.runner import attach_pipeline_metadata, stage_failed, stage_start, stage_success
+from app.data_builder.data_builder import build_tasa_document
 
 INPUT_DIR = Path("./input")
 OUTPUT_JSONL = Path("./output.jsonl")

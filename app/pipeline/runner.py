@@ -5,8 +5,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from crm_mapper import build_crm_profile
-from validators import normalize_payload_for_form
+from app.crm.mapper import build_crm_profile
+from app.core.validators import normalize_payload_for_form
 
 
 def _now_iso() -> str:

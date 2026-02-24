@@ -9,6 +9,26 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import {
+  API_BASE,
+  CLIENT_AGENT_BASE,
+  TARGET_URL_PRESETS,
+  type Step,
+  type UploadSourceKind,
+} from "@/features/workspace/constants";
+import {
+  composeDdmmyyyy,
+  composeFullName,
+  composeNie,
+  ddmmyyyyToIso,
+  isPdfTargetUrl,
+  isoToDdmmyyyy,
+  parseNieParts,
+  readErrorResponse,
+  splitDdmmyyyy,
+  splitFullName,
+  toUrl,
+} from "@/features/workspace/utils";
 import { extractAddressHints } from "@/lib/address";
 import { PHONE_COUNTRIES, composePhone, parsePhoneParts, type PhoneCountryIso, validatePhone } from "@/lib/phone";
 import type {
@@ -19,133 +39,6 @@ import type {
   SavedCrmDocument,
   UploadResponse,
 } from "@/lib/types";
-
-type Step = "upload" | "review" | "prepare" | "autofill";
-type UploadSourceKind = "" | "anketa" | "fmiliar" | "passport" | "nie_tie" | "visa";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
-const CLIENT_AGENT_BASE = process.env.NEXT_PUBLIC_CLIENT_AGENT_BASE || "http://127.0.0.1:8787";
-const TARGET_URL_PRESETS = [
-  {
-    key: "doc17_tie",
-    label: "Doc 17 - Formulario TIE",
-    url: "https://www.inclusion.gob.es/documents/410169/2156469/17-Formulario_TIE.pdf",
-  },
-  {
-    key: "doc13_autoriz_regreso",
-    label: "Doc 13 - Autorización de regreso",
-    url: "https://www.inclusion.gob.es/documents/d/migraciones/13-formulario_autoriz_de_regreso",
-  },
-  {
-    key: "doc11_larga_duracion",
-    label: "Doc 11 - Larga duración",
-    url: "https://www.inclusion.gob.es/documents/410169/2156469/11-Formulario_larga_duracixn.pdf",
-  },
-  {
-    key: "tasa_790_052",
-    label: "Tasa 790-052",
-    url: "https://sede.administracionespublicas.gob.es/tasasPDF/prepareProvincia?idModelo=790&idTasa=052",
-  },
-  {
-    key: "tasa_790_012",
-    label: "Tasa 790-012",
-    url: "https://sede.policia.gob.es/Tasa790_012/",
-  },
-] as const;
-
-function toUrl(path: string, base: string): string {
-  if (!path) return "";
-  if (path.startsWith("http://") || path.startsWith("https://")) return path;
-  return `${base}${path}`;
-}
-
-function isPdfTargetUrl(value: string): boolean {
-  const v = (value || "").trim().toLowerCase();
-  if (!v) return false;
-  return /\.pdf(?:$|\?)/i.test(v) || v.includes("/documents/d/") || v.includes("/documents/");
-}
-
-function ddmmyyyyToIso(value: string): string {
-  const v = (value || "").trim();
-  const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return "";
-  return `${m[3]}-${m[2]}-${m[1]}`;
-}
-
-function isoToDdmmyyyy(value: string): string {
-  const v = (value || "").trim();
-  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return "";
-  return `${m[3]}/${m[2]}/${m[1]}`;
-}
-
-function splitDdmmyyyy(value: string): { day: string; month: string; year: string } {
-  const v = (value || "").trim();
-  const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return { day: "", month: "", year: "" };
-  return { day: m[1], month: m[2], year: m[3] };
-}
-
-function composeDdmmyyyy(day: string, month: string, year: string): string {
-  const d = (day || "").replace(/\D/g, "").slice(0, 2);
-  const m = (month || "").replace(/\D/g, "").slice(0, 2);
-  const y = (year || "").replace(/\D/g, "").slice(0, 4);
-  if (d.length === 2 && m.length === 2 && y.length === 4) return `${d}/${m}/${y}`;
-  return "";
-}
-
-function splitFullName(value: string): { primer_apellido: string; segundo_apellido: string; nombre: string } {
-  const raw = (value || "").trim();
-  if (!raw) return { primer_apellido: "", segundo_apellido: "", nombre: "" };
-  if (raw.includes(",")) {
-    const [left, right] = raw.split(",", 2).map((x) => x.trim());
-    const parts = left.split(/\s+/).filter(Boolean);
-    return {
-      primer_apellido: parts[0] || "",
-      segundo_apellido: parts.slice(1).join(" "),
-      nombre: right || "",
-    };
-  }
-  const parts = raw.split(/\s+/).filter(Boolean);
-  if (parts.length === 1) return { primer_apellido: parts[0], segundo_apellido: "", nombre: "" };
-  if (parts.length === 2) return { primer_apellido: parts[0], segundo_apellido: "", nombre: parts[1] };
-  return { primer_apellido: parts[0], segundo_apellido: parts[1], nombre: parts.slice(2).join(" ") };
-}
-
-function composeFullName(primer_apellido: string, segundo_apellido: string, nombre: string): string {
-  const left = [primer_apellido.trim(), segundo_apellido.trim()].filter(Boolean).join(" ").trim();
-  const right = nombre.trim();
-  if (left && right) return `${left}, ${right}`;
-  return left || right;
-}
-
-function parseNieParts(value: string): { prefix: string; number: string; suffix: string } {
-  const s = (value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-  const m = s.match(/^([XYZ])(\d{7})([A-Z])$/);
-  if (!m) return { prefix: "", number: "", suffix: "" };
-  return { prefix: m[1], number: m[2], suffix: m[3] };
-}
-
-function composeNie(prefix: string, number: string, suffix: string): string {
-  const p = (prefix || "").toUpperCase().replace(/[^XYZ]/g, "");
-  const n = (number || "").replace(/\D/g, "").slice(0, 7);
-  const s = (suffix || "").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 1);
-  if (p && n.length === 7 && s) return `${p}${n}${s}`;
-  return "";
-}
-
-async function readErrorResponse(resp: Response): Promise<string> {
-  const text = await resp.text();
-  if (!text) return `Request failed (${resp.status})`;
-  try {
-    const parsed = JSON.parse(text) as { detail?: string; message?: string };
-    if (parsed.detail) return parsed.detail;
-    if (parsed.message) return parsed.message;
-  } catch {
-    // keep original text fallback
-  }
-  return text;
-}
 
 export default function HomePage() {
   const [step, setStep] = useState<Step>("upload");

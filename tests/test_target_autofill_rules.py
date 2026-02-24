@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from target_autofill import (
+from app.autofill.target_autofill import (
     build_autofill_value_map,
     _canonical_keys_from_placeholder_tokens,
     _eval_checked_when,

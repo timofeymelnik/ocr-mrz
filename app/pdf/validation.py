@@ -6,7 +6,7 @@ from typing import Any
 
 import fitz  # PyMuPDF
 
-from target_autofill import (
+from app.autofill.target_autofill import (
     CANONICAL_FIELD_KEYS,
     build_autofill_value_map,
     build_date_split_field_values,

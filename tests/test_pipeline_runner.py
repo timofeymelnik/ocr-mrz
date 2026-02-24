@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pipeline_runner import attach_pipeline_metadata
+from app.pipeline.runner import attach_pipeline_metadata
 from tests.mock_user import MOCK_USER
 
 

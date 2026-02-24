@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from validators import normalize_date, normalize_mrz_date, validate_spanish_document_number
+from app.core.validators import normalize_date, normalize_mrz_date, validate_spanish_document_number
 
 
 @dataclass

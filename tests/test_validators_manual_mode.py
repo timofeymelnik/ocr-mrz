@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from validators import collect_validation_errors
+from app.core.validators import collect_validation_errors
 from tests.mock_user import mock_payload
 
 
