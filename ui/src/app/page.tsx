@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle,
@@ -89,7 +89,7 @@ type BatchDocument = {
   label: string;
 };
 
-export default function HomePage() {
+function HomePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [step, setStep] = useState<Step>("upload");
@@ -3276,5 +3276,17 @@ export default function HomePage() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-gradient-to-b from-background to-muted/30" />
+      }
+    >
+      <HomePageContent />
+    </Suspense>
   );
 }
