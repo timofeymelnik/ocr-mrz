@@ -18,12 +18,12 @@ type UploadCrmPanelProps = {
   savedDocs: SavedCrmDocument[];
   savedDocsFilter: string;
   loadingSavedDocs: boolean;
-  deletingDocumentId: string;
+  deletingDocumentId?: string;
   saving: boolean;
   onFilterChange: (value: string) => void;
   onRefresh: () => void;
-  onOpenDocument: (documentId: string) => void;
-  onDeleteDocument: (documentId: string) => void;
+  onOpenDocument: (documentId: string, clientId?: string) => void;
+  onDeleteDocument?: (documentId: string) => void;
   activeDocumentId?: string;
 };
 
@@ -81,7 +81,7 @@ export function UploadCrmPanel({
   savedDocs,
   savedDocsFilter,
   loadingSavedDocs,
-  deletingDocumentId,
+  deletingDocumentId = "",
   saving,
   onFilterChange,
   onRefresh,
@@ -206,6 +206,11 @@ export function UploadCrmPanel({
                     {statusLabel[visualStatus]}
                   </Badge>
                 </div>
+                {Number(item.documents_count || 0) > 1 ? (
+                  <div className="mb-2 text-[11px] text-zinc-500">
+                    Документов клиента: {item.documents_count}
+                  </div>
+                ) : null}
 
                 <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-zinc-500">
                   <Clock3 className="h-3 w-3" />
@@ -216,25 +221,32 @@ export function UploadCrmPanel({
                   <Button
                     size="sm"
                     className="h-8 flex-1 rounded-lg"
-                    onClick={() => onOpenDocument(item.document_id)}
+                    onClick={() =>
+                      onOpenDocument(
+                        item.primary_document_id || item.document_id,
+                        item.client_id || "",
+                      )
+                    }
                     disabled={saving}
                   >
                     Открыть
                     <ArrowRight className="ml-1 h-3.5 w-3.5" />
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 rounded-lg border-zinc-200 px-3"
-                    onClick={() => onDeleteDocument(item.document_id)}
-                    disabled={Boolean(deletingDocumentId) || saving}
-                  >
-                    {deletingDocumentId === item.document_id ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="h-3.5 w-3.5" />
-                    )}
-                  </Button>
+                  {onDeleteDocument ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-lg border-zinc-200 px-3"
+                      onClick={() => onDeleteDocument(item.document_id)}
+                      disabled={Boolean(deletingDocumentId) || saving}
+                    >
+                      {deletingDocumentId === item.document_id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             );

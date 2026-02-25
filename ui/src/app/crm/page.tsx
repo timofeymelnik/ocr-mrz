@@ -5,21 +5,19 @@ import { AlertCircle } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { UploadCrmPanel } from "@/features/workspace/upload-crm-panel";
+import { useCrmClients } from "@/features/workspace/use-crm-clients";
 import { WorkspaceHeader } from "@/features/workspace/workspace-header";
-import { useCrmDocuments } from "@/features/workspace/use-crm-documents";
 
 export default function CrmPage() {
   const router = useRouter();
   const {
-    deletingDocumentId,
     error,
-    loadingSavedDocs,
-    savedDocs,
-    savedDocsFilter,
-    setSavedDocsFilter,
-    loadSavedDocuments,
-    deleteSavedDocument,
-  } = useCrmDocuments();
+    loadingClients,
+    clients,
+    clientsFilter,
+    setClientsFilter,
+    loadClients,
+  } = useCrmClients();
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-background to-muted/30">
@@ -46,20 +44,21 @@ export default function CrmPage() {
 
         <div className="max-w-[460px]">
           <UploadCrmPanel
-            savedDocs={savedDocs}
-            savedDocsFilter={savedDocsFilter}
-            loadingSavedDocs={loadingSavedDocs}
-            deletingDocumentId={deletingDocumentId}
+            savedDocs={clients}
+            savedDocsFilter={clientsFilter}
+            loadingSavedDocs={loadingClients}
             saving={false}
-            onFilterChange={setSavedDocsFilter}
+            onFilterChange={setClientsFilter}
             onRefresh={() => {
-              void loadSavedDocuments(savedDocsFilter);
+              void loadClients(clientsFilter);
             }}
-            onOpenDocument={(documentId) => {
+            onOpenDocument={(documentId, clientId) => {
+              const clientKey = (clientId || "").trim();
+              if (clientKey) {
+                router.push(`/crm/client/${encodeURIComponent(clientKey)}`);
+                return;
+              }
               router.push(`/crm/${encodeURIComponent(documentId)}`);
-            }}
-            onDeleteDocument={(documentId) => {
-              void deleteSavedDocument(documentId);
             }}
           />
         </div>

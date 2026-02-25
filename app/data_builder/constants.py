@@ -30,6 +30,8 @@ REQUIRED_FIELDS_MI_T = [
 
 REQUIRED_FIELDS_VISUAL_GENERIC: list[str] = []
 
+REQUIRED_FIELDS_EX_GENERIC: list[str] = []
+
 ADDRESS_ABBREVIATIONS = {
     "C": "Calle",
     "CL": "Calle",

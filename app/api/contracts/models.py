@@ -100,6 +100,66 @@ class DeleteDocumentResponse(BaseModel):
     deleted: bool
 
 
+class DeleteClientResponse(BaseModel):
+    """Delete client response payload."""
+
+    client_id: str
+    deleted: bool
+    deleted_document_ids: list[str] = Field(default_factory=list)
+
+
+class ClientProfileResponse(BaseModel):
+    """Client-level profile payload."""
+
+    client_id: str
+    profile_payload: dict[str, Any] = Field(default_factory=dict)
+    profile_meta: dict[str, Any] = Field(default_factory=dict)
+    missing_fields: list[str] = Field(default_factory=list)
+    validation_issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClientCardResponse(BaseModel):
+    """Client card response for CRM client-centric UI."""
+
+    client_id: str
+    primary_document_id: str = ""
+    display_name: str = ""
+    documents_count: int = 0
+    updated_at: str = ""
+    documents: list[dict[str, Any]] = Field(default_factory=list)
+    profile_payload: dict[str, Any] = Field(default_factory=dict)
+    profile_meta: dict[str, Any] = Field(default_factory=dict)
+    missing_fields: list[str] = Field(default_factory=list)
+    validation_issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClientProfileMergeCandidatesResponse(BaseModel):
+    """Merge candidates for client profile."""
+
+    client_id: str
+    merge_candidates: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ClientProfileEnrichRequest(BaseModel):
+    """Preview/apply merge request for client profile."""
+
+    apply: bool = False
+    source_document_id: str
+    selected_fields: list[str] | None = None
+
+
+class ClientProfileUpdateRequest(BaseModel):
+    """Update request for client profile."""
+
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClientProfileMergeCandidatesRequest(BaseModel):
+    """Request for profile merge candidates rebuild."""
+
+    force: bool = False
+
+
 class DocumentPayloadResponse(BaseModel):
     """Generic document payload used by documents endpoints."""
 

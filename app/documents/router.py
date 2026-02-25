@@ -52,6 +52,15 @@ class AddressAutofillRequest(BaseModel):
     address_line: str
 
 
+class ReprocessOCRRequest(BaseModel):
+    """Request body for OCR reprocess with manual source-kind override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_kind: str
+    tasa_code: str | None = None
+
+
 class DocumentsRouter:
     """Router factory wrapper for document read/merge endpoints."""
 
@@ -130,6 +139,27 @@ class DocumentsRouter:
                 address_line=req.address_line,
             )
             return AddressAutofillResponse(**payload)
+
+        @router.post(
+            "/api/documents/{document_id}/reprocess-ocr",
+            response_model=DocumentPayloadResponse,
+            responses={
+                404: {"model": ApiErrorResponse},
+                422: {"model": ApiErrorResponse},
+                500: {"model": ApiErrorResponse},
+            },
+        )
+        def reprocess_document_ocr(
+            document_id: str,
+            req: ReprocessOCRRequest,
+        ) -> DocumentPayloadResponse:
+            """Re-run OCR/build pipeline for existing stored source with manual type."""
+            payload = self._service.reprocess_document_ocr(
+                document_id=document_id,
+                source_kind=(req.source_kind or "").strip(),
+                tasa_code=(req.tasa_code or "").strip(),
+            )
+            return DocumentPayloadResponse(**payload)
 
         @router.post(
             "/api/documents/{document_id}/confirm",

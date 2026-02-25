@@ -17,6 +17,17 @@ from app.core.logging import set_correlation_id
 
 def register_http_middleware(app: FastAPI, *, config: AppConfig, logger: Any) -> None:
     """Attach common security and observability middleware to an app."""
+    frame_ancestors = ["'self'"]
+    for origin in config.security.cors_allowed_origins:
+        normalized = str(origin or "").strip()
+        if normalized:
+            frame_ancestors.append(normalized)
+    runtime_csp = (
+        "default-src 'self' blob: data:; "
+        f"frame-ancestors {' '.join(frame_ancestors)}; "
+        "base-uri 'none'"
+    )
+    strict_csp = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
 
     @app.middleware("http")
     async def request_size_limit_middleware(request: Request, call_next):
@@ -50,11 +61,15 @@ def register_http_middleware(app: FastAPI, *, config: AppConfig, logger: Any) ->
         response = await call_next(request)
         response.headers["X-Request-ID"] = correlation_id
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
-        )
+        is_runtime_asset = request.url.path.startswith("/runtime/")
+        if is_runtime_asset:
+            response.headers["Content-Security-Policy"] = runtime_csp
+            if "X-Frame-Options" in response.headers:
+                del response.headers["X-Frame-Options"]
+        else:
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Content-Security-Policy"] = strict_csp
         response.headers["Permissions-Policy"] = (
             "geolocation=(), microphone=(), camera=()"
         )

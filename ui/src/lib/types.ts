@@ -253,10 +253,33 @@ export type AnalyzeFieldsResponse = {
 
 export type SavedCrmDocument = {
   document_id: string;
+  primary_document_id?: string;
   client_id?: string;
   document_number: string;
   name: string;
   updated_at: string;
   status: string;
   has_edited: boolean;
+  documents_count?: number;
+};
+
+export type ClientProfileResponse = {
+  client_id: string;
+  profile_payload: Payload;
+  profile_meta: Record<string, unknown>;
+  missing_fields: string[];
+  validation_issues: Array<Record<string, unknown>>;
+};
+
+export type ClientCardResponse = {
+  client_id: string;
+  primary_document_id: string;
+  display_name: string;
+  documents_count: number;
+  updated_at: string;
+  documents: SavedCrmDocument[];
+  profile_payload: Payload;
+  profile_meta: Record<string, unknown>;
+  missing_fields: string[];
+  validation_issues: Array<Record<string, unknown>>;
 };

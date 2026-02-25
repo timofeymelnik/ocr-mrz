@@ -44,6 +44,36 @@ def _identifiers_from_payload(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _is_empty_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, list):
+        return len(value) == 0
+    if isinstance(value, dict):
+        return len(value) == 0
+    return False
+
+
+def _deep_merge_first_non_empty(base: Any, incoming: Any) -> Any:
+    """Merge two values preserving first non-empty leaf from base."""
+    if isinstance(base, dict) and isinstance(incoming, dict):
+        merged: dict[str, Any] = {}
+        keys = set(base.keys()) | set(incoming.keys())
+        for key in keys:
+            if key in base and key in incoming:
+                merged[key] = _deep_merge_first_non_empty(base[key], incoming[key])
+            elif key in base:
+                merged[key] = base[key]
+            else:
+                merged[key] = incoming[key]
+        return merged
+    if _is_empty_value(base) and not _is_empty_value(incoming):
+        return incoming
+    return base
+
+
 def _summary_from_record(record: dict[str, Any]) -> dict[str, Any]:
     identifiers = record.get("identifiers") or {}
     return {
@@ -82,6 +112,20 @@ def _dedupe_summaries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if key not in dedup:
             dedup[key] = item
     return list(dedup.values())
+
+
+def _client_group_key(summary: dict[str, Any]) -> str:
+    """Build grouping key for client-centric listing."""
+    client_id = str(summary.get("client_id") or "").strip()
+    if client_id:
+        return f"client:{client_id}"
+    doc_no = _normalized_doc_number(str(summary.get("document_number") or ""))
+    if doc_no:
+        return f"doc:{doc_no}"
+    name = _normalized_name(str(summary.get("name") or ""))
+    if name:
+        return f"name:{name}"
+    return f"id:{str(summary.get('document_id') or '').strip()}"
 
 
 class CRMRepository:
@@ -222,6 +266,153 @@ class CRMRepository:
             "name": str(identifiers.get("name") or "").strip(),
         }
 
+    @staticmethod
+    def _profile_sort_key(record: dict[str, Any]) -> tuple[int, str]:
+        """Sort docs by profile quality then recency."""
+        has_edited = bool(record.get("edited_payload"))
+        status = str(record.get("status") or "").strip().lower()
+        quality = 1 if has_edited or status == "confirmed" else 0
+        return quality, str(record.get("updated_at") or "")
+
+    def _build_profile_from_documents(self, docs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate a client profile by picking first non-empty value by priority."""
+        profile: dict[str, Any] = {}
+        for doc in sorted(docs, key=self._profile_sort_key, reverse=True):
+            payload = doc.get("effective_payload") or doc.get("edited_payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            profile = _deep_merge_first_non_empty(profile, payload)
+        return profile
+
+    def _build_client_identities(
+        self, docs: list[dict[str, Any]], profile_payload: dict[str, Any]
+    ) -> dict[str, list[str]]:
+        """Build unified client identities from linked documents and profile."""
+        values: dict[str, set[str]] = {
+            "document_number": set(),
+            "nif_nie": set(),
+            "passport": set(),
+            "name": set(),
+        }
+        for doc in docs:
+            ident = self._client_identity_from_doc(doc)
+            for key, value in ident.items():
+                if value:
+                    values[key].add(value)
+        profile_ident = _identifiers_from_payload(profile_payload)
+        for key in values:
+            profile_value = str(profile_ident.get(key) or "").strip()
+            if profile_value:
+                values[key].add(profile_value)
+        return {key: sorted(val) for key, val in values.items() if val}
+
+    def get_client(self, client_id: str) -> dict[str, Any] | None:
+        """Return client entity by id."""
+        key = str(client_id or "").strip()
+        if not key:
+            return None
+        return self._get_client(key)
+
+    def list_full_documents_by_client(self, client_id: str) -> list[dict[str, Any]]:
+        """Return full CRM document records linked to a client."""
+        key = str(client_id or "").strip()
+        if not key:
+            return []
+        if self._mongo_enabled and self._collection is not None:
+            docs = self._collection.find({"client_id": key}, {"_id": 0}).sort(
+                "updated_at", -1
+            )
+            return [dict(doc) for doc in docs]
+
+        result: list[dict[str, Any]] = []
+        for path in self._fallback_dir.glob("*.json"):
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(doc.get("client_id") or "").strip() != key:
+                continue
+            if isinstance(doc, dict):
+                result.append(doc)
+        result.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+        return result
+
+    def update_client_profile(
+        self,
+        client_id: str,
+        profile_payload: dict[str, Any],
+        *,
+        profile_source_document_id: str = "",
+        profile_merge_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist profile payload and derived fields for client."""
+        key = str(client_id or "").strip()
+        if not key:
+            raise ValueError("client_id is required for update_client_profile.")
+        existing = self._get_client(key)
+        if not existing:
+            raise ValueError(f"CRM client not found: {key}")
+        docs = self.list_full_documents_by_client(key)
+        now = _now_iso()
+        identities = self._build_client_identities(docs, profile_payload)
+        updated = {
+            **existing,
+            "profile_payload": profile_payload,
+            "profile_source_document_id": str(profile_source_document_id or ""),
+            "profile_updated_at": now,
+            "documents_count": len(docs),
+            "identities": identities,
+            "updated_at": now,
+        }
+        if profile_merge_meta is not None:
+            updated["profile_merge_meta"] = profile_merge_meta
+        self._save_client(updated)
+        return updated
+
+    def delete_client(self, client_id: str) -> bool:
+        """Delete only client entity record (documents handled separately)."""
+        key = str(client_id or "").strip()
+        if not key:
+            return False
+        if self._mongo_enabled and self._clients_collection is not None:
+            result = self._clients_collection.delete_one({"client_id": key})
+            return bool(result.deleted_count)
+        path = self._client_fallback_path(key)
+        if not path.exists():
+            return False
+        try:
+            path.unlink()
+            return True
+        except Exception:
+            LOGGER.exception("Failed deleting fallback CRM client entity: %s", path)
+            return False
+
+    def delete_documents_by_client(self, client_id: str) -> list[str]:
+        """Delete all documents linked to client and return removed ids."""
+        docs = self.list_full_documents_by_client(client_id)
+        deleted_ids: list[str] = []
+        for doc in docs:
+            doc_id = str(doc.get("document_id") or "").strip()
+            if not doc_id:
+                continue
+            if self._mongo_enabled and self._collection is not None:
+                result = self._collection.delete_one({"document_id": doc_id})
+                deleted = bool(result.deleted_count)
+            else:
+                path = self._fallback_path(doc_id)
+                if not path.exists():
+                    deleted = False
+                else:
+                    try:
+                        path.unlink()
+                        deleted = True
+                    except Exception:
+                        LOGGER.exception("Failed deleting fallback CRM record: %s", path)
+                        deleted = False
+            if deleted:
+                deleted_ids.append(doc_id)
+        return deleted_ids
+
     def ensure_client_entity(
         self,
         *,
@@ -298,10 +489,25 @@ class CRMRepository:
             "document_ids": sorted(
                 str(doc.get("document_id") or "") for doc in linked_docs
             ),
+            "documents_count": len(linked_docs),
+            "profile_payload": target_client.get("profile_payload")
+            if isinstance(target_client.get("profile_payload"), dict)
+            else self._build_profile_from_documents(linked_docs),
+            "profile_source_document_id": str(
+                target_client.get("profile_source_document_id") or primary_id
+            ),
+            "profile_updated_at": str(target_client.get("profile_updated_at") or now),
+            "profile_merge_meta": target_client.get("profile_merge_meta") or {},
             "identities": {
                 key: sorted(values) for key, values in identities.items() if values
             },
         }
+        client_record["identities"] = self._build_client_identities(
+            linked_docs,
+            client_record.get("profile_payload")
+            if isinstance(client_record.get("profile_payload"), dict)
+            else {},
+        )
         self._save_client(client_record)
 
         if source_client_id and source_client_id != client_id:
@@ -577,11 +783,122 @@ class CRMRepository:
                 continue
             if str(doc.get("client_id") or "").strip() != key:
                 continue
-            if (not include_merged) and str(doc.get("merged_into_document_id") or "").strip():
+            if (not include_merged) and str(
+                doc.get("merged_into_document_id") or ""
+            ).strip():
                 continue
             results.append(_summary_from_record(doc))
         results.sort(key=lambda d: str(d.get("updated_at") or ""), reverse=True)
         return results[:limit]
+
+    def list_clients(self, query: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        """Return client-centric summaries (one row per client/group)."""
+        client_items: list[dict[str, Any]] = []
+        if self._mongo_enabled and self._clients_collection is not None:
+            cursor = self._clients_collection.find({}, {"_id": 0}).sort("updated_at", -1)
+            for row in cursor:
+                client = dict(row)
+                identities = client.get("identities") or {}
+                document_number = str(
+                    (identities.get("document_number") or [""])[0] or ""
+                ).strip()
+                name = str(
+                    client.get("display_name")
+                    or (identities.get("name") or [""])[0]
+                    or ""
+                ).strip()
+                if query.strip():
+                    hay = f"{name} {document_number}".lower()
+                    if query.strip().lower() not in hay:
+                        continue
+                client_items.append(
+                    {
+                        "document_id": str(client.get("primary_document_id") or ""),
+                        "primary_document_id": str(
+                            client.get("primary_document_id") or ""
+                        ),
+                        "client_id": str(client.get("client_id") or ""),
+                        "document_number": document_number,
+                        "name": name,
+                        "updated_at": str(client.get("updated_at") or ""),
+                        "status": "review",
+                        "has_edited": bool(client.get("profile_updated_at")),
+                        "documents_count": int(client.get("documents_count") or 0),
+                    }
+                )
+        else:
+            for path in self._clients_fallback_dir.glob("*.json"):
+                try:
+                    client = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(client, dict):
+                    continue
+                identities = client.get("identities") or {}
+                document_number = str(
+                    (identities.get("document_number") or [""])[0] or ""
+                ).strip()
+                name = str(
+                    client.get("display_name")
+                    or (identities.get("name") or [""])[0]
+                    or ""
+                ).strip()
+                if query.strip():
+                    hay = f"{name} {document_number}".lower()
+                    if query.strip().lower() not in hay:
+                        continue
+                client_items.append(
+                    {
+                        "document_id": str(client.get("primary_document_id") or ""),
+                        "primary_document_id": str(
+                            client.get("primary_document_id") or ""
+                        ),
+                        "client_id": str(client.get("client_id") or ""),
+                        "document_number": document_number,
+                        "name": name,
+                        "updated_at": str(client.get("updated_at") or ""),
+                        "status": "review",
+                        "has_edited": bool(client.get("profile_updated_at")),
+                        "documents_count": int(client.get("documents_count") or 0),
+                    }
+                )
+        if client_items:
+            client_items.sort(
+                key=lambda row: str(row.get("updated_at") or ""), reverse=True
+            )
+            return client_items[: max(1, min(int(limit or 100), 500))]
+
+        summaries = self.search_documents(
+            query=query, limit=max(limit * 4, 1000), dedupe=False
+        )
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for summary in summaries:
+            key = _client_group_key(summary)
+            groups.setdefault(key, []).append(summary)
+
+        items: list[dict[str, Any]] = []
+        for _, docs in groups.items():
+            docs_sorted = sorted(
+                docs,
+                key=lambda row: str(row.get("updated_at") or ""),
+                reverse=True,
+            )
+            primary = docs_sorted[0]
+            items.append(
+                {
+                    "document_id": str(primary.get("document_id") or ""),
+                    "primary_document_id": str(primary.get("document_id") or ""),
+                    "client_id": str(primary.get("client_id") or ""),
+                    "document_number": str(primary.get("document_number") or ""),
+                    "name": str(primary.get("name") or ""),
+                    "updated_at": str(primary.get("updated_at") or ""),
+                    "status": str(primary.get("status") or "unknown"),
+                    "has_edited": bool(primary.get("has_edited")),
+                    "documents_count": len(docs),
+                }
+            )
+        items.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+        return items[: max(1, min(int(limit or 100), 500))]
 
     def find_latest_by_identity(
         self, document_number: str, exclude_document_id: str = ""
@@ -651,15 +968,46 @@ class CRMRepository:
         doc_id = str(document_id or "").strip()
         if not doc_id:
             return False
+        existing = self._get(doc_id) or {}
+        client_id = str(existing.get("client_id") or "").strip()
         if self._mongo_enabled and self._collection is not None:
             result = self._collection.delete_one({"document_id": doc_id})
-            return bool(result.deleted_count)
-        path = self._fallback_path(doc_id)
-        if not path.exists():
-            return False
-        try:
-            path.unlink()
-            return True
-        except Exception:
-            LOGGER.exception("Failed deleting fallback CRM record: %s", path)
-            return False
+            deleted = bool(result.deleted_count)
+        else:
+            path = self._fallback_path(doc_id)
+            if not path.exists():
+                deleted = False
+            else:
+                try:
+                    path.unlink()
+                    deleted = True
+                except Exception:
+                    LOGGER.exception("Failed deleting fallback CRM record: %s", path)
+                    deleted = False
+
+        if deleted and client_id:
+            client = self._get_client(client_id)
+            if client:
+                doc_ids = [
+                    str(value).strip()
+                    for value in (client.get("document_ids") or [])
+                    if str(value).strip() and str(value).strip() != doc_id
+                ]
+                if doc_ids:
+                    client["document_ids"] = sorted(doc_ids)
+                    client["documents_count"] = len(doc_ids)
+                    if str(client.get("primary_document_id") or "").strip() == doc_id:
+                        client["primary_document_id"] = doc_ids[0]
+                    docs = self.list_full_documents_by_client(client_id)
+                    profile_payload = client.get("profile_payload")
+                    if not isinstance(profile_payload, dict) or not profile_payload:
+                        profile_payload = self._build_profile_from_documents(docs)
+                    client["identities"] = self._build_client_identities(
+                        docs,
+                        profile_payload if isinstance(profile_payload, dict) else {},
+                    )
+                    client["updated_at"] = _now_iso()
+                    self._save_client(client)
+                else:
+                    self.delete_client(client_id)
+        return deleted

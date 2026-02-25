@@ -92,18 +92,23 @@ def _looks_like_passport(text: str, filename: str) -> bool:
 
 def _looks_like_nie_tie(text: str, filename: str) -> bool:
     """Detect NIE/TIE/DNI markers from text/name."""
-    markers = [
-        " NIE ",
-        " TIE ",
-        " DNI ",
-        "NÚMERO DE IDENTIDAD",
-        "NUMERO DE IDENTIDAD",
-        "IDENTIDAD DE EXTRANJERO",
-    ]
+    markers = [" NIE ", " TIE ", " DNI ", "NÚMERO DE IDENTIDAD", "NUMERO DE IDENTIDAD"]
     filename_markers = ["NIE", "TIE", "DNI"]
-    return any(marker in text for marker in markers) or any(
+    if any(marker in text for marker in markers) or any(
         marker in filename for marker in filename_markers
-    )
+    ):
+        return True
+    # OCR often inserts line breaks/spaces inside "Identidad de Extranjero" labels.
+    if re.search(
+        r"IDENTIDAD\s+DE\s+EXTRANJER[OA]", text, flags=re.I | re.S
+    ) or re.search(
+        r"TARJETA\s+DE\s+IDENTIDAD\s+DE\s+EXTRANJER[OA]", text, flags=re.I | re.S
+    ):
+        return True
+    # Common Spanish immigration form family markers (EX-17, EX17, EX 17...).
+    if re.search(r"\bEX\s*[-–]?\s*(1[0-9]|2[0-9]|0?[1-9])\b", text, flags=re.I):
+        return True
+    return False
 
 
 def _looks_like_visa(text: str, filename: str) -> bool:

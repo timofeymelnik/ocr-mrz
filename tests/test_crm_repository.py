@@ -45,7 +45,10 @@ def test_crm_repository_upsert_get_and_save_edited_payload(
     assert edited["status"] == "confirmed"
     assert loaded is not None
     assert loaded["identifiers"]["name"] == "ALFA TEST EDITED"
-    assert loaded["edited_payload"]["identificacion"]["nombre_apellidos"] == "ALFA TEST EDITED"
+    assert (
+        loaded["edited_payload"]["identificacion"]["nombre_apellidos"]
+        == "ALFA TEST EDITED"
+    )
 
 
 def test_crm_repository_search_documents_dedupes_by_document_number(
@@ -172,3 +175,95 @@ def test_crm_repository_search_ignores_merged_docs_and_handles_bad_json(
     summaries = repo.search_documents(limit=10)
 
     assert summaries == []
+
+
+def test_crm_repository_list_clients_groups_by_client_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("MONGODB_URI", raising=False)
+    repo = CRMRepository(tmp_path)
+    repo.upsert_from_upload(
+        document_id="doc-1",
+        payload=_payload("X1", "ALFA TEST"),
+        ocr_document={},
+        source={},
+        missing_fields=[],
+        manual_steps_required=[],
+        form_url="u",
+        target_url="u",
+    )
+    repo.update_document_fields("doc-1", {"client_id": "client-1"})
+    sleep(0.01)
+    repo.upsert_from_upload(
+        document_id="doc-2",
+        payload=_payload("X1", "ALFA TEST"),
+        ocr_document={},
+        source={},
+        missing_fields=[],
+        manual_steps_required=[],
+        form_url="u",
+        target_url="u",
+    )
+    repo.update_document_fields("doc-2", {"client_id": "client-1"})
+
+    clients = repo.list_clients(limit=10)
+
+    assert len(clients) == 1
+    assert clients[0]["client_id"] == "client-1"
+    assert clients[0]["documents_count"] == 2
+    assert clients[0]["document_id"] == "doc-2"
+
+
+def test_crm_repository_client_profile_and_cascade_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("MONGODB_URI", raising=False)
+    repo = CRMRepository(tmp_path)
+    repo.upsert_from_upload(
+        document_id="doc-1",
+        payload=_payload("X1", "ALFA TEST"),
+        ocr_document={},
+        source={"stored_path": str(tmp_path / "runtime" / "uploads" / "doc-1.pdf")},
+        missing_fields=[],
+        manual_steps_required=[],
+        form_url="u",
+        target_url="u",
+    )
+    repo.upsert_from_upload(
+        document_id="doc-2",
+        payload={
+            "identificacion": {
+                "nif_nie": "X1",
+                "pasaporte": "P1",
+                "nombre_apellidos": "ALFA TEST",
+            },
+            "extra": {"email": "a@test.com"},
+        },
+        ocr_document={},
+        source={},
+        missing_fields=[],
+        manual_steps_required=[],
+        form_url="u",
+        target_url="u",
+    )
+    client = repo.ensure_client_entity(document_id="doc-1", source_document_id="doc-2")
+    client_id = str(client.get("client_id") or "")
+    assert client_id
+    updated = repo.update_client_profile(
+        client_id,
+        {
+            "identificacion": {
+                "nif_nie": "X1",
+                "pasaporte": "P1",
+                "nombre_apellidos": "ALFA TEST",
+            },
+            "extra": {"email": "updated@test.com"},
+        },
+        profile_source_document_id="doc-2",
+    )
+    assert updated["profile_payload"]["extra"]["email"] == "updated@test.com"
+
+    deleted_docs = repo.delete_documents_by_client(client_id)
+    deleted_client = repo.delete_client(client_id)
+    assert sorted(deleted_docs) == ["doc-1", "doc-2"]
+    assert deleted_client is True

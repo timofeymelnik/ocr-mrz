@@ -175,6 +175,7 @@ def create_app() -> FastAPI:
         repo=CRM_REPO,
         default_target_url=DEFAULT_TARGET_URL,
         safe_value=_safe,
+        artifact_url_from_value=_artifact_url_from_value,
         read_record=_read_record,
         run_browser_call=_run_browser_call,
         close_browser_session=close_browser_session,
@@ -192,7 +193,12 @@ def create_app() -> FastAPI:
             crm_doc = CRM_REPO.get_document(document_id)
             if not crm_doc:
                 raise
-            record = build_record_from_crm(document_id, crm_doc, DEFAULT_TARGET_URL)
+            record = build_record_from_crm(
+                document_id,
+                crm_doc,
+                DEFAULT_TARGET_URL,
+                artifact_url_from_value=_artifact_url_from_value,
+            )
             _write_record(document_id, record)
             return record
 
@@ -229,6 +235,10 @@ def create_app() -> FastAPI:
             source_document_id=source_document_id,
             selected_fields=selected_fields,
         ),
+        build_tasa_document=build_tasa_document,
+        normalize_payload_for_form=normalize_payload_for_form,
+        create_ocr_client=VisionOCRClient,
+        artifact_url_from_value=_artifact_url_from_value,
         safe_value=_safe,
     )
     app.include_router(create_documents_router(service=documents_service))

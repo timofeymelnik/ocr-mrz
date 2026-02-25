@@ -104,6 +104,24 @@ def test_http_setup_adds_security_headers_and_request_id() -> None:
     assert response.headers["X-Content-Type-Options"] == "nosniff"
 
 
+def test_http_setup_runtime_assets_allow_iframe_preview() -> None:
+    app = FastAPI()
+    register_http_middleware(app, config=_config(), logger=LOGGER)
+    register_exception_handlers(app, logger=LOGGER)
+    dispatch = _dispatch_by_name(app, "request_logging_middleware")
+
+    request = _request("/runtime/uploads/sample.pdf")
+
+    async def call_next(_request: Request) -> Response:
+        return Response(content="pdf", status_code=200)
+
+    response = asyncio.run(dispatch(request, call_next))
+    assert response.headers["X-Request-ID"]
+    assert "X-Frame-Options" not in response.headers
+    csp = response.headers["Content-Security-Policy"]
+    assert "frame-ancestors 'self' http://localhost:3000" in csp
+
+
 def test_http_setup_rejects_large_request_before_handler() -> None:
     app = FastAPI()
     register_http_middleware(app, config=_config(), logger=LOGGER)

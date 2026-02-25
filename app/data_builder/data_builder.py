@@ -16,8 +16,13 @@ from app.data_builder.constants import (
     ADDRESS_ABBREVIATIONS,
     MONTHS_ES,
     REQUIRED_FIELDS_790_012,
+    REQUIRED_FIELDS_EX_GENERIC,
     REQUIRED_FIELDS_MI_T,
     REQUIRED_FIELDS_VISUAL_GENERIC,
+)
+from app.data_builder.ex_forms_parser import (
+    detect_ex_form_code,
+    parse_ex_form_fields,
 )
 from app.data_builder.geocoding import fetch_geocode_candidates
 from app.data_builder.mrz_parser import parse_mrz_lines
@@ -1474,7 +1479,80 @@ def build_tasa_document(
         "familiar_full_name": familiar_ref.get("full_name", ""),
     }
 
+    fields_visual_generic = {
+        "nif_nie": _safe(overrides.get("nif_nie"))
+        or _safe(visual_fields.get("nif_nie"))
+        or nie_or_nif,
+        "pasaporte": _safe(overrides.get("pasaporte"))
+        or _safe(visual_fields.get("pasaporte"))
+        or passport_number,
+        "apellidos_nombre_razon_social": _safe(
+            overrides.get("apellidos_nombre_razon_social")
+        )
+        or full_name,
+        "tipo_via": _safe(address_parts.get("tipo_via")),
+        "nombre_via_publica": _safe(address_parts.get("nombre_via_publica")),
+        "numero": _safe(address_parts.get("numero")),
+        "escalera": _safe(address_parts.get("escalera")),
+        "piso": _safe(address_parts.get("piso")),
+        "puerta": _safe(address_parts.get("puerta")),
+        "telefono": _safe(overrides.get("telefono"))
+        or _safe(visual_fields.get("telefono")),
+        "email": _normalize_email(overrides.get("email"))
+        or _normalize_email(visual_fields.get("email")),
+        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento")))
+        or fecha_nacimiento,
+        "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
+        "lugar_nacimiento": lugar_nacimiento,
+        "nombre_padre": nombre_padre,
+        "nombre_madre": nombre_madre,
+        "municipio": _safe(address_parts.get("municipio")),
+        "provincia": _safe(address_parts.get("provincia")),
+        "codigo_postal": _safe(address_parts.get("codigo_postal")),
+        "localidad_declaracion": _safe(overrides.get("localidad_declaracion"))
+        or _safe(visual_fields.get("localidad_declaracion")),
+        "fecha": _safe(overrides.get("fecha")) or _safe(visual_fields.get("fecha")),
+        "forma_pago": _safe(overrides.get("forma_pago"))
+        or _safe(visual_fields.get("forma_pago")),
+        "iban": _safe(overrides.get("iban")) or _safe(visual_fields.get("iban")),
+    }
+
     form_kind = _detect_form_kind(merged_upper, form_pdf, tasa_code)
+    ex_form_code = detect_ex_form_code(merged_text=merged, tasa_code=tasa_code)
+    ex_fields: dict[str, Any] = {}
+    ex_strategy = ""
+    if ex_form_code:
+        ex_fields, ex_strategy = parse_ex_form_fields(
+            ex_form_code=ex_form_code,
+            merged_text=merged,
+            fallback_fields={
+                "nif_nie": _safe(fields_mi_t.get("nif_nie")),
+                "pasaporte": _safe(fields_mi_t.get("pasaporte")),
+                "apellidos": _safe(fields_mi_t.get("apellidos")),
+                "nombre": _safe(fields_mi_t.get("nombre")),
+                "full_name": _safe(fields_mi_t.get("full_name")),
+                "fecha_nacimiento": _safe(fields_mi_t.get("fecha_nacimiento")),
+                "nacionalidad": _safe(fields_mi_t.get("nacionalidad")),
+                "sexo": _safe(fields_mi_t.get("sexo")),
+                "estado_civil": _safe(fields_mi_t.get("estado_civil")),
+                "lugar_nacimiento": _safe(fields_mi_t.get("lugar_nacimiento")),
+                "nombre_padre": _safe(fields_mi_t.get("nombre_padre")),
+                "nombre_madre": _safe(fields_mi_t.get("nombre_madre")),
+                "tipo_via": _safe(fields_mi_t.get("tipo_via")),
+                "nombre_via_publica": _safe(fields_mi_t.get("nombre_via_publica")),
+                "numero": _safe(fields_mi_t.get("numero")),
+                "escalera": _safe(fields_mi_t.get("escalera")),
+                "piso": _safe(fields_mi_t.get("piso")),
+                "puerta": _safe(fields_mi_t.get("puerta")),
+                "municipio": _safe(fields_mi_t.get("municipio")),
+                "provincia": _safe(fields_mi_t.get("provincia")),
+                "codigo_postal": _safe(fields_mi_t.get("codigo_postal")),
+                "telefono": _safe(fields_mi_t.get("telefono")),
+                "email": _safe(fields_mi_t.get("email")),
+            },
+            overrides=overrides,
+        )
+        form_kind = ex_form_code
     if is_identity_source and form_kind == "790_012":
         # Uploaded source is an identity document (not a form), keep extraction but avoid forcing form-specific strategy.
         form_kind = "visual_generic"
@@ -1485,56 +1563,25 @@ def build_tasa_document(
     elif form_kind == "mi_t":
         required_for_form = REQUIRED_FIELDS_MI_T
         base_fields = fields_mi_t
+    elif form_kind.startswith("ex_"):
+        required_for_form = REQUIRED_FIELDS_EX_GENERIC
+        base_fields = ex_fields
     else:
         required_for_form = REQUIRED_FIELDS_VISUAL_GENERIC
-        base_fields = {
-            "nif_nie": _safe(overrides.get("nif_nie"))
-            or _safe(visual_fields.get("nif_nie"))
-            or nie_or_nif,
-            "pasaporte": _safe(overrides.get("pasaporte"))
-            or _safe(visual_fields.get("pasaporte"))
-            or passport_number,
-            "apellidos_nombre_razon_social": _safe(
-                overrides.get("apellidos_nombre_razon_social")
-            )
-            or full_name,
-            "tipo_via": _safe(address_parts.get("tipo_via")),
-            "nombre_via_publica": _safe(address_parts.get("nombre_via_publica")),
-            "numero": _safe(address_parts.get("numero")),
-            "escalera": _safe(address_parts.get("escalera")),
-            "piso": _safe(address_parts.get("piso")),
-            "puerta": _safe(address_parts.get("puerta")),
-            "telefono": _safe(overrides.get("telefono"))
-            or _safe(visual_fields.get("telefono")),
-            "email": _normalize_email(overrides.get("email"))
-            or _normalize_email(visual_fields.get("email")),
-            "fecha_nacimiento": _to_spanish_date(
-                _safe(overrides.get("fecha_nacimiento"))
-            )
-            or fecha_nacimiento,
-            "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
-            "lugar_nacimiento": lugar_nacimiento,
-            "nombre_padre": nombre_padre,
-            "nombre_madre": nombre_madre,
-            "municipio": _safe(address_parts.get("municipio")),
-            "provincia": _safe(address_parts.get("provincia")),
-            "codigo_postal": _safe(address_parts.get("codigo_postal")),
-            "localidad_declaracion": _safe(overrides.get("localidad_declaracion"))
-            or _safe(visual_fields.get("localidad_declaracion")),
-            "fecha": _safe(overrides.get("fecha")) or _safe(visual_fields.get("fecha")),
-            "forma_pago": _safe(overrides.get("forma_pago"))
-            or _safe(visual_fields.get("forma_pago")),
-            "iban": _safe(overrides.get("iban")) or _safe(visual_fields.get("iban")),
-        }
+        base_fields = fields_visual_generic
     validation = _build_validation(base_fields, required_for_form)
-    if not base_fields["nif_nie"]:
+    if not _safe(base_fields.get("nif_nie")) and not _safe(
+        base_fields.get("pasaporte")
+    ):
         validation["ok"] = False
-        validation["errors"].append("NIE/NIF not confidently extracted.")
+        validation["errors"].append(
+            "Identity document number (NIE/NIF or passport) not confidently extracted."
+        )
         validation["missing_required_for_form"] = sorted(
-            set(validation["missing_required_for_form"] + ["nif_nie"])
+            set(validation["missing_required_for_form"] + ["nif_nie", "pasaporte"])
         )
         validation["needs_user_input"] = sorted(
-            set(validation["needs_user_input"] + ["nif_nie"])
+            set(validation["needs_user_input"] + ["nif_nie", "pasaporte"])
         )
 
     if not address_expanded:
@@ -1604,9 +1651,28 @@ def build_tasa_document(
         },
     }
 
+    form_ex = {
+        "fields": ex_fields if form_kind.startswith("ex_") else {},
+        "derived": {
+            "form_code": ex_form_code or "",
+            "parser_strategy": ex_strategy,
+            "address_freeform": address_freeform,
+            "normalized_address": normalized_address,
+            "place_id": place_id,
+            "address_abbreviations_used": abbr_used,
+        },
+    }
+
     forms: dict[str, Any] = {"790_012": form_790_012}
     if form_kind != "790_012":
-        forms[form_kind] = form_mi_t if form_kind == "mi_t" else form_visual_generic
+        if form_kind == "mi_t":
+            forms[form_kind] = form_mi_t
+        elif form_kind.startswith("ex_"):
+            forms[form_kind] = form_ex
+        else:
+            forms[form_kind] = form_visual_generic
+
+    effective_tasa_code = form_kind if form_kind.startswith("ex_") else tasa_code
 
     return {
         "_id": {"$oid": uuid.uuid4().hex[:24]},
@@ -1616,7 +1682,7 @@ def build_tasa_document(
             if source_kind_norm != "visa"
             else "visa_tasa_payload"
         ),
-        "tasa_code": tasa_code,
+        "tasa_code": effective_tasa_code,
         "source": {
             "source_file": source_file,
             "source_kind": source_kind_norm,
@@ -1631,6 +1697,7 @@ def build_tasa_document(
         "form_visual_generic": (
             form_visual_generic if form_kind == "visual_generic" else {}
         ),
+        "form_ex": form_ex if form_kind.startswith("ex_") else {},
         "validation": validation,
         "discrepancies": discrepancies,
         "reference": {

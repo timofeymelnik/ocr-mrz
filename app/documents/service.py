@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from app.api.errors import ApiError, ApiErrorCode
 from app.data_builder.address_parser import expand_abbrev, parse_address_parts
 from app.data_builder.geocoding import fetch_geocode_candidates
+from app.documents.source_kind import (
+    CANONICAL_SOURCE_KINDS,
+    normalize_source_kind,
+)
 from app.documents.workflow import WORKFLOW_PREPARE, WORKFLOW_REVIEW, stage_to_next_step
 
 
@@ -35,6 +40,13 @@ class CRMRepositoryProtocol(Protocol):
         """Create/update client entity and link selected documents."""
 
 
+class OCRClientProtocol(Protocol):
+    """Protocol for OCR client used during document reprocessing."""
+
+    def extract_text(self, source_path: Path) -> Any:
+        """Extract OCR text from source file."""
+
+
 class DocumentsService:
     """Business logic for document fetch/confirm/merge flows."""
 
@@ -57,6 +69,12 @@ class DocumentsService:
         enrich_record_payload_by_identity: Callable[
             [str, dict[str, Any], bool, str, list[str] | None], dict[str, Any]
         ],
+        build_tasa_document: Callable[..., dict[str, Any]] | None = None,
+        normalize_payload_for_form: (
+            Callable[[dict[str, Any]], dict[str, Any]] | None
+        ) = None,
+        create_ocr_client: Callable[[], OCRClientProtocol] | None = None,
+        artifact_url_from_value: Callable[[Any], str] | None = None,
         safe_value: Callable[[Any], str],
         google_maps_api_key: str | None = None,
     ) -> None:
@@ -69,6 +87,10 @@ class DocumentsService:
         self._collect_validation_issues = collect_validation_issues
         self._sync_family_reference = sync_family_reference
         self._enrich_record_payload_by_identity = enrich_record_payload_by_identity
+        self._build_tasa_document = build_tasa_document
+        self._normalize_payload_for_form = normalize_payload_for_form
+        self._create_ocr_client = create_ocr_client
+        self._artifact_url_from_value = artifact_url_from_value
         self._safe_value = safe_value
         self._google_maps_api_key = (
             str(google_maps_api_key or "").strip()
@@ -84,9 +106,7 @@ class DocumentsService:
         return str(value).strip()
 
     @classmethod
-    def _geocode_component(
-        cls, candidate: dict[str, Any], component_type: str
-    ) -> str:
+    def _geocode_component(cls, candidate: dict[str, Any], component_type: str) -> str:
         """Extract geocode component by Google type."""
         components = candidate.get("address_components") or []
         if not isinstance(components, list):
@@ -145,16 +165,224 @@ class DocumentsService:
             match = re.search(rf"\b{re.escape(zip_code)}\b\s*,\s*([^,]+)", text, re.I)
             if match:
                 return cls._safe_text(match.group(1)).title()
-        parts = [cls._safe_text(part) for part in text.split(",") if cls._safe_text(part)]
+        parts = [
+            cls._safe_text(part) for part in text.split(",") if cls._safe_text(part)
+        ]
         if len(parts) >= 2:
             maybe_city = parts[-2]
             if not re.fullmatch(r"\d{5}", maybe_city):
                 return maybe_city.title()
         return ""
 
+    @staticmethod
+    def _identifiers_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+        """Build CRM identifiers map from normalized payload."""
+        ident = payload.get("identificacion") if isinstance(payload, dict) else {}
+        if not isinstance(ident, dict):
+            ident = {}
+        nif_nie = str(ident.get("nif_nie") or "").strip()
+        passport = str(ident.get("pasaporte") or "").strip()
+        return {
+            "document_number": nif_nie or passport,
+            "nif_nie": nif_nie,
+            "passport": passport,
+            "name": str(ident.get("nombre_apellidos") or "").strip(),
+        }
+
+    @staticmethod
+    def _pick_client_match_candidate(
+        merge_candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Choose strongest candidate similarly to upload pipeline rules."""
+        if not merge_candidates:
+            return {}
+        by_identity = [
+            row
+            for row in merge_candidates
+            if "document_match" in (row.get("reasons") or [])
+        ]
+        if by_identity:
+            return dict(by_identity[0])
+        top = merge_candidates[0]
+        if int(top.get("score") or 0) >= 100:
+            return dict(top)
+        return {}
+
+    def _resolve_preview_url(self, source_data: dict[str, Any]) -> str:
+        """Resolve preview URL using stored preview or source path fallback."""
+        preview_url = self._safe_value(source_data.get("preview_url"))
+        if preview_url:
+            return preview_url
+        if self._artifact_url_from_value is None:
+            return ""
+        stored_path = self._safe_value(source_data.get("stored_path"))
+        if not stored_path:
+            return ""
+        return self._safe_value(self._artifact_url_from_value(stored_path))
+
     def get_document(self, document_id: str) -> dict[str, Any]:
         """Return document record restored from runtime/CRM storage."""
-        return self._read_or_bootstrap_record(document_id)
+        record = self._read_or_bootstrap_record(document_id)
+        source = record.get("source")
+        source_data = source if isinstance(source, dict) else {}
+        preview_url = self._resolve_preview_url(source_data)
+        if preview_url:
+            record["preview_url"] = preview_url
+        return record
+
+    def reprocess_document_ocr(
+        self,
+        document_id: str,
+        *,
+        source_kind: str,
+        tasa_code: str = "",
+    ) -> dict[str, Any]:
+        """Re-run OCR/build pipeline for existing document with manual source kind."""
+        if (
+            self._build_tasa_document is None
+            or self._normalize_payload_for_form is None
+            or self._create_ocr_client is None
+        ):
+            raise ApiError(
+                status_code=500,
+                error_code=ApiErrorCode.INTERNAL_SERVER_ERROR,
+                message="OCR reprocess dependencies are not configured.",
+            )
+        normalized_source_kind = normalize_source_kind(source_kind)
+        if not normalized_source_kind:
+            raise ApiError(
+                status_code=422,
+                error_code=ApiErrorCode.VALIDATION_ERROR,
+                message=(
+                    "source_kind must be one of: "
+                    + ", ".join(sorted(CANONICAL_SOURCE_KINDS))
+                ),
+            )
+
+        record = self._read_or_bootstrap_record(document_id)
+        source = record.get("source")
+        source_data = source if isinstance(source, dict) else {}
+        stored_path_raw = self._safe_value(source_data.get("stored_path"))
+        if not stored_path_raw:
+            raise ApiError(
+                status_code=422,
+                error_code=ApiErrorCode.DOCUMENT_INVALID_PAYLOAD,
+                message="Document source path is missing; cannot rerun OCR.",
+            )
+        source_path = Path(stored_path_raw)
+        if not source_path.exists():
+            raise ApiError(
+                status_code=422,
+                error_code=ApiErrorCode.DOCUMENT_INVALID_PAYLOAD,
+                message=f"Stored source file not found: {stored_path_raw}",
+            )
+
+        ocr_client = self._create_ocr_client()
+        ocr_result = ocr_client.extract_text(source_path)
+        effective_tasa_code = self._safe_value(tasa_code) or self._safe_value(
+            record.get("tasa_code")
+        )
+        if not effective_tasa_code:
+            effective_tasa_code = "790_012"
+        source_file = (
+            self._safe_value(source_data.get("original_filename")) or source_path.name
+        )
+        document = self._build_tasa_document(
+            ocr_front=self._safe_value(getattr(ocr_result, "full_text", "")),
+            ocr_back="",
+            user_overrides={},
+            geocode_candidates=None,
+            google_maps_api_key=self._google_maps_api_key,
+            tasa_code=effective_tasa_code,
+            source_file=source_file,
+            source_kind=normalized_source_kind,
+        )
+        payload = self._normalize_payload_for_form(document)
+        merge_candidates = self._merge_candidates_for_payload(document_id, payload, 10)
+        client_match = self._pick_client_match_candidate(merge_candidates)
+        identity_source_document_id = self._safe_value(client_match.get("document_id"))
+        identity_match_found = bool(identity_source_document_id)
+        workflow_stage = "client_match" if identity_match_found else WORKFLOW_REVIEW
+        missing_fields = self._collect_validation_errors(payload, False)
+        validation_issues = self._collect_validation_issues(payload, False)
+
+        updated_source = {
+            **source_data,
+            "source_kind": normalized_source_kind,
+            "source_kind_input": normalized_source_kind,
+            "source_kind_detected": normalized_source_kind,
+            "source_kind_confidence": 1.0,
+            "source_kind_auto": False,
+            "source_kind_requires_review": False,
+        }
+        record.update(
+            {
+                "source": updated_source,
+                "document": document,
+                "payload": payload,
+                "missing_fields": missing_fields,
+                "validation_issues": validation_issues,
+                "merge_candidates": merge_candidates,
+                "client_match": client_match,
+                "client_match_decision": "pending" if identity_match_found else "none",
+                "identity_match_found": identity_match_found,
+                "identity_source_document_id": identity_source_document_id,
+                "workflow_stage": workflow_stage,
+                "tasa_code": self._safe_value(document.get("tasa_code"))
+                or effective_tasa_code,
+            }
+        )
+        self._write_record(document_id, record)
+        self._crm_repo.update_document_fields(
+            document_id,
+            {
+                "source": updated_source,
+                "ocr_document": document,
+                "ocr_payload": payload,
+                "edited_payload": None,
+                "effective_payload": payload,
+                "identifiers": self._identifiers_from_payload(payload),
+                "missing_fields": missing_fields,
+                "merge_candidates": merge_candidates,
+                "client_match": client_match,
+                "client_match_decision": (
+                    "pending" if identity_match_found else "none"
+                ),
+                "identity_match_found": identity_match_found,
+                "identity_source_document_id": identity_source_document_id,
+                "workflow_stage": workflow_stage,
+                "status": "uploaded",
+            },
+        )
+
+        preview_url = self._resolve_preview_url(updated_source)
+        return {
+            "document_id": document_id,
+            "preview_url": preview_url,
+            "source": updated_source,
+            "document": document,
+            "payload": payload,
+            "missing_fields": missing_fields,
+            "validation_issues": validation_issues,
+            "manual_steps_required": record.get("manual_steps_required", []),
+            "form_url": self._safe_value(record.get("form_url")),
+            "target_url": self._safe_value(record.get("target_url")),
+            "identity_match_found": identity_match_found,
+            "identity_source_document_id": identity_source_document_id,
+            "workflow_stage": workflow_stage,
+            "workflow_next_step": stage_to_next_step(workflow_stage),
+            "source_kind_input": normalized_source_kind,
+            "source_kind_detected": normalized_source_kind,
+            "source_kind_confidence": 1.0,
+            "source_kind_auto": False,
+            "source_kind_requires_review": False,
+            "client_match": client_match,
+            "client_match_decision": ("pending" if identity_match_found else "none"),
+            "enrichment_preview": list(record.get("enrichment_preview") or []),
+            "merge_candidates": merge_candidates,
+            "family_links": record.get("family_links") or [],
+            "family_reference": record.get("family_reference") or {},
+        }
 
     def autofill_address_from_line(
         self, document_id: str, address_line: str
@@ -187,10 +415,9 @@ class DocumentsService:
         geocoded_tipo, geocoded_nombre = self._extract_via_from_route(geocoded_route)
         geocoded_numero = self._geocode_component(best, "street_number")
         geocoded_cp = self._geocode_component(best, "postal_code")
-        geocoded_municipio = (
-            self._geocode_component(best, "locality")
-            or self._geocode_component(best, "administrative_area_level_2")
-        )
+        geocoded_municipio = self._geocode_component(
+            best, "locality"
+        ) or self._geocode_component(best, "administrative_area_level_2")
         geocoded_provincia = self._geocode_component(
             best, "administrative_area_level_1"
         )
