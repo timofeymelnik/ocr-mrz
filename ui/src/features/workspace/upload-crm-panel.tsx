@@ -21,7 +21,7 @@ type UploadCrmPanelProps = {
   deletingDocumentId?: string;
   saving: boolean;
   onFilterChange: (value: string) => void;
-  onRefresh: () => void;
+  onRefresh?: () => void;
   onOpenDocument: (documentId: string, clientId?: string) => void;
   onDeleteDocument?: (documentId: string) => void;
   activeDocumentId?: string;
@@ -157,19 +157,21 @@ export function UploadCrmPanel({
           ))}
         </div>
 
-        <Button
-          variant="outline"
-          className="h-8 w-full rounded-lg border-zinc-200 bg-white text-xs"
-          onClick={onRefresh}
-          disabled={loadingSavedDocs}
-        >
-          {loadingSavedDocs ? (
-            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-          )}
-          Обновить список
-        </Button>
+        {onRefresh ? (
+          <Button
+            variant="outline"
+            className="h-8 w-full rounded-lg border-zinc-200 bg-white text-xs"
+            onClick={onRefresh}
+            disabled={loadingSavedDocs}
+          >
+            {loadingSavedDocs ? (
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+            )}
+            Обновить список
+          </Button>
+        ) : null}
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 pb-3 pt-3">

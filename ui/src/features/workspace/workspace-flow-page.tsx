@@ -339,17 +339,16 @@ export function WorkspaceFlowPage({ routeStep }: WorkspaceFlowPageProps) {
     void (async () => {
       await openSavedDocument(documentIdFromQuery, crmClientIdFromQuery);
       if (requestedStep) {
-        const nextStep = fallbackStep(requestedStep);
-        if (nextStep !== requestedStep) {
-          setError("Этот шаг сейчас недоступен. Переводим на доступный экран.");
-        }
-        setStepAndSync(nextStep);
+        setStepAndSync(requestedStep, {
+          documentId: documentIdFromQuery,
+          clientId: crmClientIdFromQuery,
+        });
       }
     })();
   }, [documentIdFromQuery, crmClientIdFromQuery, requestedStep]);
 
   useEffect(() => {
-    if (!requestedStep || documentIdFromQuery) return;
+    if (!requestedStep) return;
     const nextStep = fallbackStep(requestedStep);
     if (nextStep !== step) {
       if (nextStep !== requestedStep) {
@@ -357,7 +356,7 @@ export function WorkspaceFlowPage({ routeStep }: WorkspaceFlowPageProps) {
       }
       setStepAndSync(nextStep);
     }
-  }, [requestedStep, step, documentIdFromQuery, documentId, payload, hasMergeSources]);
+  }, [requestedStep, step, documentId, payload, hasMergeSources]);
 
   function applyMergeStateFromCandidates(
     candidates: MergeCandidate[] | undefined,

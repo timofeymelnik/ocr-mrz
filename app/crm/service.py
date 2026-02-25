@@ -158,6 +158,7 @@ def build_record_from_crm(
         "form_url": crm_doc.get("form_url") or default_target_url,
         "target_url": crm_doc.get("target_url") or default_target_url,
         "browser_session_id": crm_doc.get("browser_session_id") or "",
+        "autofill_preview": crm_doc.get("autofill_preview") or {},
         "identity_match_found": bool(crm_doc.get("identity_match_found")),
         "identity_source_document_id": crm_doc.get("identity_source_document_id") or "",
         "source_kind_input": source.get("source_kind_input") or "",

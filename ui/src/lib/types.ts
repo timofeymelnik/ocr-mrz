@@ -123,6 +123,13 @@ export type UploadResponse = {
   client_match?: MergeCandidate;
   client_match_decision?: string;
   merge_candidates?: MergeCandidate[];
+  autofill_preview?: {
+    status?: string;
+    mode?: string;
+    filled_pdf_url?: string;
+    filled_pdf_path?: string;
+    message?: string;
+  };
   enrichment_preview?: Array<{
     field: string;
     current_value: string;

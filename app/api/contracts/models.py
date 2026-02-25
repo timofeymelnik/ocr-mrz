@@ -175,6 +175,7 @@ class DocumentPayloadResponse(BaseModel):
     form_url: str = ""
     target_url: str = ""
     browser_session_id: str = ""
+    autofill_preview: dict[str, Any] = Field(default_factory=dict)
     enrichment_preview: list[dict[str, Any]] = Field(default_factory=list)
     enrichment_skipped: list[dict[str, Any]] = Field(default_factory=list)
     merge_candidates: list[dict[str, Any]] = Field(default_factory=list)
