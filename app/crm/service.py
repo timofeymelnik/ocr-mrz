@@ -8,12 +8,22 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from fastapi import HTTPException
 
+from app.api.errors import ApiError, ApiErrorCode
+from app.documents.workflow import resolve_workflow_stage, stage_to_next_step
+
 
 class CRMRepositoryProtocol(Protocol):
     """Protocol describing repository methods used by CRM service."""
 
-    def search_documents(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def search_documents(
+        self, query: str, limit: int, dedupe: bool
+    ) -> list[dict[str, Any]]:
         """Search stored CRM documents with optional text query."""
+
+    def list_documents_by_client(
+        self, client_id: str, *, limit: int, include_merged: bool
+    ) -> list[dict[str, Any]]:
+        """List all client-linked documents."""
 
     def get_document(self, document_id: str) -> dict[str, Any] | None:
         """Return CRM document by id, or ``None`` when it does not exist."""
@@ -35,8 +45,10 @@ def build_record_from_crm(
         or {}
     )
     source = crm_doc.get("source") or {}
+    workflow_stage = resolve_workflow_stage(crm_doc)
     return {
         "document_id": document_id,
+        "client_id": str(crm_doc.get("client_id") or ""),
         "preview_url": source.get("preview_url") or "",
         "source": source,
         "document": crm_doc.get("ocr_document") or {},
@@ -48,8 +60,18 @@ def build_record_from_crm(
         "target_url": crm_doc.get("target_url") or default_target_url,
         "browser_session_id": crm_doc.get("browser_session_id") or "",
         "identity_match_found": bool(crm_doc.get("identity_match_found")),
-        "identity_source_document_id": crm_doc.get("identity_source_document_id")
+        "identity_source_document_id": crm_doc.get("identity_source_document_id") or "",
+        "source_kind_input": source.get("source_kind_input") or "",
+        "source_kind_detected": source.get("source_kind_detected")
+        or source.get("source_kind")
         or "",
+        "source_kind_confidence": float(source.get("source_kind_confidence") or 0.0),
+        "source_kind_auto": bool(source.get("source_kind_auto")),
+        "source_kind_requires_review": bool(source.get("source_kind_requires_review")),
+        "workflow_stage": workflow_stage,
+        "workflow_next_step": stage_to_next_step(workflow_stage),
+        "client_match": crm_doc.get("client_match") or {},
+        "client_match_decision": crm_doc.get("client_match_decision") or "none",
         "enrichment_preview": crm_doc.get("enrichment_preview") or [],
         "merge_candidates": crm_doc.get("merge_candidates") or [],
         "family_links": crm_doc.get("family_links") or [],
@@ -82,17 +104,34 @@ class CRMService:
         self._record_path = record_path
         self._logger = logger
 
-    def list_documents(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def list_documents(
+        self, query: str, limit: int, include_duplicates: bool = False
+    ) -> list[dict[str, Any]]:
         """Return CRM summaries for listing API."""
-        return self._repo.search_documents(query=query, limit=limit)
+        return self._repo.search_documents(
+            query=query,
+            limit=limit,
+            dedupe=not include_duplicates,
+        )
+
+    def list_client_documents(
+        self, client_id: str, limit: int, include_merged: bool = True
+    ) -> list[dict[str, Any]]:
+        """Return documents linked to a client entity."""
+        return self._repo.list_documents_by_client(
+            client_id=client_id,
+            limit=limit,
+            include_merged=include_merged,
+        )
 
     def get_document(self, document_id: str) -> dict[str, Any]:
         """Return CRM document converted to response shape or raise 404."""
         crm_doc = self._repo.get_document(document_id)
         if not crm_doc:
-            raise HTTPException(
+            raise ApiError(
                 status_code=404,
-                detail=f"CRM document not found: {document_id}",
+                error_code=ApiErrorCode.CRM_DOCUMENT_NOT_FOUND,
+                message=f"CRM document not found: {document_id}",
             )
         return build_record_from_crm(
             document_id=document_id,
@@ -104,9 +143,10 @@ class CRMService:
         """Delete CRM document and linked runtime state."""
         crm_doc = self._repo.get_document(document_id)
         if not crm_doc:
-            raise HTTPException(
+            raise ApiError(
                 status_code=404,
-                detail=f"CRM document not found: {document_id}",
+                error_code=ApiErrorCode.CRM_DOCUMENT_NOT_FOUND,
+                message=f"CRM document not found: {document_id}",
             )
 
         session_id = self._safe_value(crm_doc.get("browser_session_id"))
@@ -124,9 +164,10 @@ class CRMService:
 
         deleted = self._repo.delete_document(document_id)
         if not deleted:
-            raise HTTPException(
+            raise ApiError(
                 status_code=500,
-                detail=f"Failed deleting CRM document: {document_id}",
+                error_code=ApiErrorCode.CRM_DELETE_FAILED,
+                message=f"Failed deleting CRM document: {document_id}",
             )
 
         self._delete_local_record(document_id=document_id)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from app.data_builder.data_builder import build_tasa_document
 from app.core.validators import normalize_payload_for_form
+from app.data_builder.data_builder import build_tasa_document
 from tests.mock_user import MOCK_USER
 
 
@@ -70,7 +70,9 @@ def test_normalize_payload_for_form_sets_document_type_defaults() -> None:
     assert normalized_nie["identificacion"]["documento_tipo"] == "nif_tie_nie_dni"
 
 
-def test_build_tasa_document_handles_truncated_passport_mrz_and_spaced_passport_number() -> None:
+def test_build_tasa_document_handles_truncated_passport_mrz_and_spaced_passport_number() -> (
+    None
+):
     extra = MOCK_USER["extra"]
     ocr_text = "\n".join(
         [
@@ -109,7 +111,9 @@ def test_build_tasa_document_extracts_visa_mrz_identity() -> None:
             "0255851334RUS1308127M2612144<M<<1215",
         ]
     )
-    document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="visa")
+    document = build_tasa_document(
+        ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="visa"
+    )
     card = document.get("card_extracted", {})
     fields_790 = document.get("form_790_012", {}).get("fields", {})
 
@@ -131,7 +135,9 @@ def test_build_tasa_document_treats_fmiliar_as_form_source() -> None:
             "CALLE MAYOR 15 28013 MADRID MADRID - ESP",
         ]
     )
-    document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="fmiliar")
+    document = build_tasa_document(
+        ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="fmiliar"
+    )
     fields_790 = document.get("form_790_012", {}).get("fields", {})
 
     assert fields_790.get("tipo_via") == "Calle"
@@ -175,7 +181,9 @@ def test_build_tasa_document_extracts_mi_f_ds_tokens() -> None:
             f"DFD_NOMBRE: {relative_first_name}",
         ]
     )
-    document = build_tasa_document(ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="fmiliar")
+    document = build_tasa_document(
+        ocr_front=ocr_text, ocr_back="", user_overrides={}, source_kind="fmiliar"
+    )
     card = document.get("card_extracted", {})
     fields = document.get("form_mi_t", {}).get("fields", {})
 

@@ -1,4 +1,10 @@
-export type Step = "upload" | "review" | "prepare" | "autofill";
+export type Step =
+  | "upload"
+  | "match"
+  | "merge"
+  | "review"
+  | "prepare"
+  | "autofill";
 
 export type UploadSourceKind =
   | ""

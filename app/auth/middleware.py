@@ -7,6 +7,8 @@ from typing import Callable
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.api.contracts import ApiErrorResponse
+from app.api.errors import ApiErrorCode, to_error_payload
 from app.auth.service import AuthService
 
 
@@ -42,12 +44,21 @@ def create_auth_middleware(service: AuthService) -> Callable:
 
         token = _extract_bearer_token(request.headers.get("authorization", ""))
         if not token:
-            return JSONResponse(status_code=401, content={"detail": "Missing bearer token"})
+            return JSONResponse(
+                status_code=401,
+                content=ApiErrorResponse(
+                    error_code=ApiErrorCode.AUTH_MISSING_TOKEN,
+                    message="Missing bearer token",
+                ).model_dump(),
+            )
 
         try:
             user = service.verify_access_token(token)
         except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=to_error_payload(exc.detail, exc.status_code),
+            )
 
         request.state.user = user
         return await call_next(request)

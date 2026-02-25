@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.data_builder.data_builder import _expand_abbrev, _parse_address_parts, _postal_tipo_via_aliases
+from app.data_builder.data_builder import (
+    _expand_abbrev,
+    _parse_address_parts,
+    _postal_tipo_via_aliases,
+)
 
 
 def test_expand_abbrev_supports_urb() -> None:
@@ -19,7 +23,9 @@ def test_parse_address_parts_extracts_urbanizacion() -> None:
     assert parts["numero"] == "8A"
 
 
-def test_parse_address_parts_uses_postal_dictionary_aliases(tmp_path: Path, monkeypatch) -> None:
+def test_parse_address_parts_uses_postal_dictionary_aliases(
+    tmp_path: Path, monkeypatch
+) -> None:
     catalog = tmp_path / "postal_types.json"
     catalog.write_text(json.dumps({"aliases": {"RBLA": "RAMBLA"}}), encoding="utf-8")
     monkeypatch.setenv("POSTAL_STREET_TYPE_DICT_PATH", str(catalog))
@@ -31,4 +37,3 @@ def test_parse_address_parts_uses_postal_dictionary_aliases(tmp_path: Path, monk
         assert parts["numero"] == "12"
     finally:
         _postal_tipo_via_aliases.cache_clear()
-

@@ -7,8 +7,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import HTTPException
-
+from app.api.errors import ApiError, ApiErrorCode
 from app.auth.models import AuthSession, AuthUser, RefreshTokenRecord
 from app.auth.repository import AuthRepository
 from app.core.config import AuthConfig
@@ -56,9 +55,17 @@ class AuthService:
         """Authenticate credentials and issue access/refresh token pair."""
         user = self._repo.get_user_by_email(email.strip().lower())
         if user is None or not user.is_active:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_INVALID_CREDENTIALS,
+                message="Invalid credentials",
+            )
         if not verify_password(password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_INVALID_CREDENTIALS,
+                message="Invalid credentials",
+            )
         return self._issue_session_for_user(user)
 
     def _issue_session_for_user(self, user: AuthUser) -> AuthSession:
@@ -99,7 +106,7 @@ class AuthService:
                 jti=refresh_jti,
                 user_id=user.user_id,
                 token_hash=self._hash_token(refresh_token),
-                expires_at=refresh_payload["exp"],
+                expires_at=now_ts + self._config.refresh_token_ttl_seconds,
                 revoked=False,
             )
         )
@@ -123,19 +130,35 @@ class AuthService:
         jti = str(payload.get("jti") or "")
         record = self._repo.get_refresh_token(jti)
         if record is None or record.revoked:
-            raise HTTPException(status_code=401, detail="Invalid refresh token")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message="Invalid refresh token",
+            )
         if record.expires_at < int(time.time()):
             self._repo.revoke_refresh_token(jti)
-            raise HTTPException(status_code=401, detail="Refresh token expired")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message="Refresh token expired",
+            )
         if record.token_hash != self._hash_token(refresh_token):
             self._repo.revoke_refresh_token(jti)
-            raise HTTPException(status_code=401, detail="Refresh token mismatch")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message="Refresh token mismatch",
+            )
 
         self._repo.revoke_refresh_token(jti)
         email = str(payload.get("email") or "").strip().lower()
         user = self._repo.get_user_by_email(email)
         if user is None or not user.is_active:
-            raise HTTPException(status_code=401, detail="User not found")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message="User not found",
+            )
         return self._issue_session_for_user(user)
 
     def logout(self, refresh_token: str | None) -> None:
@@ -144,7 +167,7 @@ class AuthService:
             return
         try:
             payload = self._decode_token(refresh_token, expected_type="refresh")
-        except HTTPException:
+        except ApiError:
             return
         jti = str(payload.get("jti") or "")
         if jti:
@@ -165,12 +188,24 @@ class AuthService:
         try:
             payload = decode_signed_token(token, self._config.secret_key)
         except ValueError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message=str(exc),
+            ) from exc
 
         if str(payload.get("iss") or "") != self._config.issuer:
-            raise HTTPException(status_code=401, detail="Invalid token issuer")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message="Invalid token issuer",
+            )
         if str(payload.get("type") or "") != expected_type:
-            raise HTTPException(status_code=401, detail="Invalid token type")
+            raise ApiError(
+                status_code=401,
+                error_code=ApiErrorCode.AUTH_TOKEN_INVALID,
+                message="Invalid token type",
+            )
         return payload
 
     @staticmethod

@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import shutil
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,8 +11,36 @@ from urllib.parse import urlparse
 
 import fitz  # PyMuPDF
 import requests
-from requests.exceptions import SSLError
 from playwright.sync_api import Page, sync_playwright
+from requests.exceptions import SSLError
+
+from app.autofill.placeholder_helpers import (
+    canonical_from_placeholder as _canonical_from_placeholder_impl,
+    canonical_keys_from_placeholder_tokens as _canonical_keys_from_placeholder_tokens_impl,
+    eval_checked_when as _eval_checked_when_impl,
+    rule_context as _rule_context_impl,
+    select_canonical_for_composite_placeholder as _select_canonical_for_composite_placeholder_impl,
+)
+from app.autofill.target_helpers import (
+    build_date_split_field_values as _build_date_split_field_values,
+    compose_floor_door_token as _compose_floor_door_token,
+    infer_spanish_province_from_cp as _infer_spanish_province_from_cp,
+    norm_text as _norm_text,
+    normalize_ascii_upper as _normalize_ascii_upper,
+    normalize_door_token,
+    normalize_signal as _normalize_signal,
+    sanitize_floor_token as _sanitize_floor_token,
+    split_address_details as _split_address_details,
+    split_compact_floor_door as _split_compact_floor_door,
+    split_date_parts as _split_date_parts,
+    strip_extra_spaces as _strip_extra_spaces,
+)
+from app.autofill.target_pdf_helpers import (
+    build_nif_split_field_map as _build_nif_split_field_map_impl,
+    infer_pdf_checkbox_expected as _infer_pdf_checkbox_expected_impl,
+    pdf_value_for_field as _pdf_value_for_field_impl,
+    should_ignore_pdf_mapping as _should_ignore_pdf_mapping_impl,
+)
 
 try:
     import certifi
@@ -71,6 +98,7 @@ CANONICAL_FIELD_KEYS: list[str] = [
 ]
 
 CANONICAL_FILL_PRIORITY: list[str] = list(CANONICAL_FIELD_KEYS)
+CANONICAL_FIELD_KEY_SET: set[str] = set(CANONICAL_FIELD_KEYS)
 PLACEHOLDER_RE = re.compile(r"^\{([a-z_]+)\}$", re.I)
 PLACEHOLDER_TOKEN_RE = re.compile(r"\{([a-z_]+)\}", re.I)
 
@@ -87,19 +115,28 @@ def is_template_debug_capture_enabled() -> bool:
 
 def should_save_artifact_screenshots() -> bool:
     # Screenshots are allowed only in explicit template debug mode.
-    return is_template_debug_capture_enabled() and _env_flag("SAVE_ARTIFACT_SCREENSHOTS", False)
+    return is_template_debug_capture_enabled() and _env_flag(
+        "SAVE_ARTIFACT_SCREENSHOTS", False
+    )
 
 
 def should_save_artifact_screenshots_on_error() -> bool:
     # Error screenshots must also stay behind debug gate.
-    return is_template_debug_capture_enabled() and _env_flag("SAVE_ARTIFACT_SCREENSHOTS_ON_ERROR", True)
+    return is_template_debug_capture_enabled() and _env_flag(
+        "SAVE_ARTIFACT_SCREENSHOTS_ON_ERROR", True
+    )
 
 
 def _chromium_executable_path() -> str | None:
     explicit = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "").strip()
     if explicit:
         return explicit
-    for candidate in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]:
+    for candidate in [
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+    ]:
         found = shutil.which(candidate)
         if found:
             return found
@@ -118,10 +155,6 @@ def _slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (value or "").lower()).strip("_")
 
 
-def _norm_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
-
-
 def _safe(payload: dict[str, Any], *path: str) -> str:
     node: Any = payload
     for key in path:
@@ -131,108 +164,6 @@ def _safe(payload: dict[str, Any], *path: str) -> str:
     if node is None:
         return ""
     return str(node).strip()
-
-
-def _strip_extra_spaces(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "")).strip(" ,.-")
-
-
-def _sanitize_floor_token(value: str) -> str:
-    v = _strip_extra_spaces(value).upper()
-    if v in {"CP", "C.P", "C.P.", "CODIGO POSTAL", "CÓDIGO POSTAL"}:
-        return ""
-    return _strip_extra_spaces(value)
-
-
-def _compose_floor_door_token(piso: str, puerta: str) -> str:
-    piso_clean = _sanitize_floor_token(piso)
-    puerta_clean = _strip_extra_spaces(puerta)
-    if piso_clean and puerta_clean:
-        piso_norm = _norm_text(piso_clean)
-        puerta_norm = _norm_text(puerta_clean)
-        # Avoid duplicating door token when OCR already merged it into floor (e.g. "5C").
-        if puerta_norm and puerta_norm in piso_norm:
-            return piso_clean
-        return f"{piso_clean} {puerta_clean}".strip()
-    return piso_clean or puerta_clean
-
-
-def _normalize_door_token(value: str) -> str:
-    raw = _strip_extra_spaces(value).upper()
-    if not raw:
-        return ""
-    translit = {
-        "А": "A",
-        "В": "B",
-        "Е": "E",
-        "К": "K",
-        "М": "M",
-        "Н": "H",
-        "О": "O",
-        "Р": "P",
-        "С": "C",
-        "Т": "T",
-        "Х": "X",
-    }
-    return "".join(translit.get(ch, ch) for ch in raw)
-
-
-def _split_compact_floor_door(piso: str, puerta: str) -> tuple[str, str]:
-    piso_clean = _sanitize_floor_token(piso)
-    puerta_clean = _normalize_door_token(puerta)
-    if piso_clean and puerta_clean:
-        # If floor already contains the same door letter (e.g. "5C", "5 C", "5º C"),
-        # keep only numeric floor in piso and preserve door in puerta.
-        compact_with_door = re.fullmatch(r"(\d{1,3})\s*[ºª]?\s*([A-Z])", piso_clean.upper())
-        if compact_with_door and compact_with_door.group(2) == puerta_clean:
-            return compact_with_door.group(1), puerta_clean
-    if piso_clean and not puerta_clean:
-        compact = re.fullmatch(r"(\d{1,3})\s*([A-Z])", piso_clean.upper())
-        if compact:
-            return compact.group(1), compact.group(2)
-    return piso_clean, puerta_clean
-
-
-def _split_address_details(nombre_via: str) -> tuple[str, str, str, str, str]:
-    """
-    Try to extract trailing address detail tokens from street name:
-    numero/escalera/piso/puerta.
-    Keeps original explicit values as source of truth in _build_value_map.
-    """
-    raw = _strip_extra_spaces(nombre_via)
-    if not raw:
-        return "", "", "", "", ""
-
-    work = f" {raw} "
-    inferred_numero = ""
-    inferred_escalera = ""
-    inferred_piso = ""
-    inferred_puerta = ""
-
-    patterns = [
-        ("numero", re.compile(r"\b(?:n[úu]m(?:ero)?\.?|num\.?)\s*([0-9A-Z][0-9A-Z\-]*)\b", re.I)),
-        ("escalera", re.compile(r"\b(?:escalera|esc\.?|portal|bloque)\s*([0-9A-Z][0-9A-Z\-]*)\b", re.I)),
-        ("piso", re.compile(r"\b(?:piso|planta)\s*([0-9A-Zºª][0-9A-Zºª\-]*)\b", re.I)),
-        ("puerta", re.compile(r"\b(?:puerta|pta\.?|casa)\s*([0-9A-Z][0-9A-Z\-]*)\b", re.I)),
-    ]
-
-    for kind, pattern in patterns:
-        m = pattern.search(work)
-        if not m:
-            continue
-        token = (m.group(1) or "").strip().upper()
-        if kind == "numero":
-            inferred_numero = token
-        elif kind == "escalera":
-            inferred_escalera = token
-        elif kind == "piso":
-            inferred_piso = token
-        elif kind == "puerta":
-            inferred_puerta = token
-        work = work[: m.start()] + " " + work[m.end() :]
-
-    cleaned = _strip_extra_spaces(work)
-    return cleaned, inferred_numero, inferred_escalera, inferred_piso, inferred_puerta
 
 
 def _infer_target_type(target_url: str) -> str:
@@ -250,20 +181,32 @@ def _infer_target_type(target_url: str) -> str:
     # Probe headers/redirect target to avoid false html mode.
     headers = {"User-Agent": "Mozilla/5.0 OCR-MRZ Autofill"}
     try:
-        head = requests.head(target_url, timeout=8, headers=headers, allow_redirects=True)
+        head = requests.head(
+            target_url, timeout=8, headers=headers, allow_redirects=True
+        )
         content_type = (head.headers.get("content-type") or "").lower()
         content_disp = (head.headers.get("content-disposition") or "").lower()
         final_path = (urlparse(head.url).path or "").lower()
-        if "application/pdf" in content_type or ".pdf" in final_path or ".pdf" in content_disp:
+        if (
+            "application/pdf" in content_type
+            or ".pdf" in final_path
+            or ".pdf" in content_disp
+        ):
             return "pdf"
     except Exception:
         pass
     try:
-        probe = requests.get(target_url, timeout=8, headers=headers, allow_redirects=True, stream=True)
+        probe = requests.get(
+            target_url, timeout=8, headers=headers, allow_redirects=True, stream=True
+        )
         content_type = (probe.headers.get("content-type") or "").lower()
         content_disp = (probe.headers.get("content-disposition") or "").lower()
         final_path = (urlparse(probe.url).path or "").lower()
-        if "application/pdf" in content_type or ".pdf" in final_path or ".pdf" in content_disp:
+        if (
+            "application/pdf" in content_type
+            or ".pdf" in final_path
+            or ".pdf" in content_disp
+        ):
             return "pdf"
     except Exception:
         pass
@@ -288,10 +231,14 @@ def _fetch_pdf_bytes(target_url: str, timeout_ms: int) -> tuple[bytes, str]:
             verify=verify_value,
         )
     except SSLError:
-        insecure_fallback = os.getenv("PDF_SSL_INSECURE_FALLBACK", "0").strip().lower() in {"1", "true", "yes", "on"}
+        insecure_fallback = os.getenv(
+            "PDF_SSL_INSECURE_FALLBACK", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if not insecure_fallback:
             raise
-        LOGGER.warning("SSL verification failed for PDF URL. Retrying with verify=False due to PDF_SSL_INSECURE_FALLBACK=1")
+        LOGGER.warning(
+            "SSL verification failed for PDF URL. Retrying with verify=False due to PDF_SSL_INSECURE_FALLBACK=1"
+        )
         resp = requests.get(
             target_url,
             timeout=max(10, timeout_ms // 1000),
@@ -302,25 +249,45 @@ def _fetch_pdf_bytes(target_url: str, timeout_ms: int) -> tuple[bytes, str]:
     content_type = (resp.headers.get("content-type") or "").lower()
     data = resp.content or b""
     if not data.startswith(b"%PDF") and "application/pdf" not in content_type:
-        raise RuntimeError(f"Target URL does not look like PDF (content-type={content_type}).")
+        raise RuntimeError(
+            f"Target URL does not look like PDF (content-type={content_type})."
+        )
     return data, content_type
 
 
 def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
     nombre_apellidos = _safe(payload, "identificacion", "nombre_apellidos")
     nacionalidad = _safe(payload, "extra", "nacionalidad")
-    apellido1, apellido2, nombre = _split_name_for_spanish_fields(nombre_apellidos, nacionalidad)
+    apellido1, apellido2, nombre = _split_name_for_spanish_fields(
+        nombre_apellidos, nacionalidad
+    )
     explicit_apellido1 = _safe(payload, "identificacion", "primer_apellido")
     explicit_apellido2 = _safe(payload, "identificacion", "segundo_apellido")
     explicit_nombre = _safe(payload, "identificacion", "nombre")
     normalized_nombre_apellidos = _strip_extra_spaces(
-        " ".join(x for x in [explicit_apellido1 or apellido1, explicit_apellido2 or apellido2, explicit_nombre or nombre] if x)
+        " ".join(
+            x
+            for x in [
+                explicit_apellido1 or apellido1,
+                explicit_apellido2 or apellido2,
+                explicit_nombre or nombre,
+            ]
+            if x
+        )
     )
     if not normalized_nombre_apellidos:
-        normalized_nombre_apellidos = _strip_extra_spaces(nombre_apellidos.replace(",", " "))
+        normalized_nombre_apellidos = _strip_extra_spaces(
+            nombre_apellidos.replace(",", " ")
+        )
     tipo_via = _safe(payload, "domicilio", "tipo_via")
     raw_nombre_via = _safe(payload, "domicilio", "nombre_via")
-    cleaned_nombre_via, inferred_numero, inferred_escalera, inferred_piso, inferred_puerta = _split_address_details(raw_nombre_via)
+    (
+        cleaned_nombre_via,
+        inferred_numero,
+        inferred_escalera,
+        inferred_piso,
+        inferred_puerta,
+    ) = _split_address_details(raw_nombre_via)
     nombre_via = cleaned_nombre_via or raw_nombre_via
     numero = _safe(payload, "domicilio", "numero") or inferred_numero
     escalera = _safe(payload, "domicilio", "escalera") or inferred_escalera
@@ -345,7 +312,9 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
         or _safe(payload, "autoliquidacion", "importe_complementaria")
     )
     fecha_dia, fecha_mes, fecha_anio = _split_date_parts(fecha_decl)
-    fecha_nacimiento_dia, fecha_nacimiento_mes, fecha_nacimiento_anio = _split_date_parts(fecha_nac)
+    fecha_nacimiento_dia, fecha_nacimiento_mes, fecha_nacimiento_anio = (
+        _split_date_parts(fecha_nac)
+    )
     return {
         "nif_nie": nif_nie,
         "nif_nie_prefix": nie_prefix,
@@ -391,7 +360,9 @@ def _build_value_map(payload: dict[str, Any]) -> dict[str, str]:
         "representante_legal": _safe(payload, "extra", "representante_legal"),
         "representante_documento": _safe(payload, "extra", "representante_documento"),
         "titulo_representante": _safe(payload, "extra", "titulo_representante"),
-        "hijos_escolarizacion_espana": _safe(payload, "extra", "hijos_escolarizacion_espana"),
+        "hijos_escolarizacion_espana": _safe(
+            payload, "extra", "hijos_escolarizacion_espana"
+        ),
     }
 
 
@@ -399,113 +370,28 @@ def build_autofill_value_map(payload: dict[str, Any]) -> dict[str, str]:
     return _build_value_map(payload)
 
 
-def _normalize_signal(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
-
-
-def _normalize_ascii_upper(value: str) -> str:
-    text = unicodedata.normalize("NFD", (value or "").strip().upper())
-    return "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
-
-
-def _infer_spanish_province_from_cp(cp_value: str) -> str:
-    cp = re.sub(r"\D+", "", cp_value or "")
-    if len(cp) < 2:
-        return ""
-    prefix = cp[:2]
-    by_prefix = {
-        "01": "ALAVA",
-        "02": "ALBACETE",
-        "03": "ALICANTE",
-        "04": "ALMERIA",
-        "05": "AVILA",
-        "06": "BADAJOZ",
-        "07": "BALEARES",
-        "08": "BARCELONA",
-        "09": "BURGOS",
-        "10": "CACERES",
-        "11": "CADIZ",
-        "12": "CASTELLON",
-        "13": "CIUDAD REAL",
-        "14": "CORDOBA",
-        "15": "A CORUNA",
-        "16": "CUENCA",
-        "17": "GIRONA",
-        "18": "GRANADA",
-        "19": "GUADALAJARA",
-        "20": "GUIPUZCOA",
-        "21": "HUELVA",
-        "22": "HUESCA",
-        "23": "JAEN",
-        "24": "LEON",
-        "25": "LLEIDA",
-        "26": "LA RIOJA",
-        "27": "LUGO",
-        "28": "MADRID",
-        "29": "MALAGA",
-        "30": "MURCIA",
-        "31": "NAVARRA",
-        "32": "OURENSE",
-        "33": "ASTURIAS",
-        "34": "PALENCIA",
-        "35": "LAS PALMAS",
-        "36": "PONTEVEDRA",
-        "37": "SALAMANCA",
-        "38": "SANTA CRUZ DE TENERIFE",
-        "39": "CANTABRIA",
-        "40": "SEGOVIA",
-        "41": "SEVILLA",
-        "42": "SORIA",
-        "43": "TARRAGONA",
-        "44": "TERUEL",
-        "45": "TOLEDO",
-        "46": "VALENCIA",
-        "47": "VALLADOLID",
-        "48": "VIZCAYA",
-        "49": "ZAMORA",
-        "50": "ZARAGOZA",
-        "51": "CEUTA",
-        "52": "MELILLA",
-    }
-    return by_prefix.get(prefix, "")
+build_date_split_field_values = _build_date_split_field_values
+_normalize_door_token = normalize_door_token
 
 
 def _canonical_from_placeholder(value: str) -> str:
-    m = PLACEHOLDER_RE.fullmatch((value or "").strip())
-    if not m:
-        return ""
-    key = m.group(1).strip().lower()
-    return key if key in CANONICAL_FIELD_KEYS else ""
+    return _canonical_from_placeholder_impl(
+        value,
+        placeholder_re=PLACEHOLDER_RE,
+        canonical_field_keys=CANONICAL_FIELD_KEY_SET,
+    )
 
 
 def _canonical_keys_from_placeholder_tokens(value: str) -> tuple[list[str], list[str]]:
-    found = [m.group(1).strip().lower() for m in PLACEHOLDER_TOKEN_RE.finditer(value or "")]
-    if not found:
-        return [], []
-    known: list[str] = []
-    unknown: list[str] = []
-    seen_known: set[str] = set()
-    seen_unknown: set[str] = set()
-    for key in found:
-        if key in CANONICAL_FIELD_KEYS:
-            if key not in seen_known:
-                known.append(key)
-                seen_known.add(key)
-        elif key not in seen_unknown:
-            unknown.append(key)
-            seen_unknown.add(key)
-    return known, unknown
+    return _canonical_keys_from_placeholder_tokens_impl(
+        value,
+        placeholder_token_re=PLACEHOLDER_TOKEN_RE,
+        canonical_field_keys=CANONICAL_FIELD_KEY_SET,
+    )
 
 
 def _select_canonical_for_composite_placeholder(keys: list[str]) -> str:
-    if not keys:
-        return ""
-    key_set = set(keys)
-    if "domicilio_en_espana" in key_set or ("tipo_via" in key_set and "nombre_via" in key_set):
-        return "domicilio_en_espana"
-    if "nombre_apellidos" in key_set or {"nombre", "primer_apellido"}.issubset(key_set):
-        return "nombre_apellidos"
-    return keys[0]
+    return _select_canonical_for_composite_placeholder_impl(keys)
 
 
 def _set_if_possible(page: Page, selectors: list[str], value: str) -> bool:
@@ -548,7 +434,12 @@ def _select_if_possible(page: Page, selectors: list[str], value: str) -> bool:
                 val = (opt.get_attribute("value") or "").strip()
                 text_norm = _normalize_ascii_upper(text)
                 val_norm = _normalize_ascii_upper(val)
-                if text.lower() == desired or val.lower() == desired or text_norm == desired_norm or val_norm == desired_norm:
+                if (
+                    text.lower() == desired
+                    or val.lower() == desired
+                    or text_norm == desired_norm
+                    or val_norm == desired_norm
+                ):
                     if val:
                         loc.select_option(value=val)
                     else:
@@ -588,7 +479,7 @@ def _fill_by_label(page: Page, patterns: list[str], value: str) -> bool:
 
 
 def inspect_form_fields(page: Page) -> list[dict[str, Any]]:
-    return page.evaluate(
+    rows = page.evaluate(
         """
         () => {
           const elements = Array.from(document.querySelectorAll("input, select, textarea"));
@@ -630,9 +521,12 @@ def inspect_form_fields(page: Page) -> list[dict[str, Any]]:
         }
         """
     )
+    return rows if isinstance(rows, list) else []
 
 
-def extract_html_placeholder_mappings(page: Page) -> tuple[list[dict[str, Any]], list[str]]:
+def extract_html_placeholder_mappings(
+    page: Page,
+) -> tuple[list[dict[str, Any]], list[str]]:
     rows = page.evaluate(
         """
         () => {
@@ -663,7 +557,14 @@ def extract_html_placeholder_mappings(page: Page) -> tuple[list[dict[str, Any]],
             continue
         key = _canonical_from_placeholder(value)
         if key:
-            mappings.append({"selector": selector, "canonical_key": key, "source": "placeholder", "confidence": 1.0})
+            mappings.append(
+                {
+                    "selector": selector,
+                    "canonical_key": key,
+                    "source": "placeholder",
+                    "confidence": 1.0,
+                }
+            )
             continue
         m = PLACEHOLDER_RE.fullmatch(value)
         if m:
@@ -678,9 +579,11 @@ def inspect_pdf_fields_from_bytes(data: bytes) -> list[dict[str, Any]]:
         for page_index, page in enumerate(doc):
             blocks = page.get_text("blocks") or []
 
-            def guess_label_for_rect(rect: fitz.Rect) -> str:
+            def guess_label_for_rect(
+                rect: fitz.Rect, text_blocks: list[tuple[Any, ...]] = blocks
+            ) -> str:
                 candidates: list[tuple[float, str]] = []
-                for block in blocks:
+                for block in text_blocks:
                     if len(block) < 5:
                         continue
                     x0, y0, x1, y1 = block[:4]
@@ -688,14 +591,20 @@ def inspect_pdf_fields_from_bytes(data: bytes) -> list[dict[str, Any]]:
                     if not text:
                         continue
                     # Prefer text on the left in the same row.
-                    same_row = abs(((y0 + y1) / 2) - ((rect.y0 + rect.y1) / 2)) <= max(12, rect.height * 0.8)
+                    same_row = abs(((y0 + y1) / 2) - ((rect.y0 + rect.y1) / 2)) <= max(
+                        12, rect.height * 0.8
+                    )
                     on_left = x1 <= rect.x0 + 6
                     if same_row and on_left:
-                        dist = (rect.x0 - x1) + abs(((y0 + y1) / 2) - ((rect.y0 + rect.y1) / 2))
+                        dist = (rect.x0 - x1) + abs(
+                            ((y0 + y1) / 2) - ((rect.y0 + rect.y1) / 2)
+                        )
                         candidates.append((dist, text))
                         continue
                     # Then text above field.
-                    above = y1 <= rect.y0 + 4 and abs(x0 - rect.x0) <= max(60, rect.width * 0.8)
+                    above = y1 <= rect.y0 + 4 and abs(x0 - rect.x0) <= max(
+                        60, rect.width * 0.8
+                    )
                     if above:
                         dist = (rect.y0 - y1) + abs(x0 - rect.x0)
                         candidates.append((dist + 40.0, text))
@@ -738,12 +647,16 @@ def inspect_pdf_fields_from_bytes(data: bytes) -> list[dict[str, Any]]:
     return rows
 
 
-def inspect_pdf_fields_from_url(target_url: str, *, timeout_ms: int = 20000) -> list[dict[str, Any]]:
+def inspect_pdf_fields_from_url(
+    target_url: str, *, timeout_ms: int = 20000
+) -> list[dict[str, Any]]:
     data, _ = _fetch_pdf_bytes(target_url, timeout_ms)
     return inspect_pdf_fields_from_bytes(data)
 
 
-def extract_pdf_placeholder_mappings_from_bytes(data: bytes) -> tuple[list[dict[str, Any]], list[str]]:
+def extract_pdf_placeholder_mappings_from_bytes(
+    data: bytes,
+) -> tuple[list[dict[str, Any]], list[str]]:
     doc = fitz.open(stream=data, filetype="pdf")
     mappings: list[dict[str, Any]] = []
     unknown_vars: list[str] = []
@@ -791,7 +704,9 @@ def extract_pdf_placeholder_mappings_from_bytes(data: bytes) -> tuple[list[dict[
     return mappings, sorted(set(unknown_vars))
 
 
-def extract_pdf_placeholder_mappings_from_url(target_url: str, *, timeout_ms: int = 20000) -> tuple[list[dict[str, Any]], list[str]]:
+def extract_pdf_placeholder_mappings_from_url(
+    target_url: str, *, timeout_ms: int = 20000
+) -> tuple[list[dict[str, Any]], list[str]]:
     data, _ = _fetch_pdf_bytes(target_url, timeout_ms)
     mappings, unknown_vars = extract_pdf_placeholder_mappings_from_bytes(data)
     for item in mappings:
@@ -810,8 +725,18 @@ def suggest_mappings_for_fields(
     patterns: dict[str, list[str]] = {
         "nif_nie": [r"nif", r"nie", r"document", r"identidad"],
         "pasaporte": [r"pasaport", r"passport"],
-        "primer_apellido": [r"primerapellido", r"apellido1", r"firstsurname", r"razonsocial"],
-        "segundo_apellido": [r"segundoapellido", r"2apellido", r"apellido2", r"secondsurname"],
+        "primer_apellido": [
+            r"primerapellido",
+            r"apellido1",
+            r"firstsurname",
+            r"razonsocial",
+        ],
+        "segundo_apellido": [
+            r"segundoapellido",
+            r"2apellido",
+            r"apellido2",
+            r"secondsurname",
+        ],
         "nombre": [r"^nombre$", r"nombre\*$", r"name", r"forename"],
         "nombre_apellidos": [r"nombre", r"apellidos", r"razonsocial", r"fullname"],
         "sexo": [r"sexo", r"sex"],
@@ -843,7 +768,12 @@ def suggest_mappings_for_fields(
         "nombre_padre": [r"padre", r"father"],
         "nombre_madre": [r"madre", r"mother"],
         "representante_legal": [r"representantelegal", r"representante"],
-        "representante_documento": [r"dni", r"pas", r"dniniepas", r"documentorepresentante"],
+        "representante_documento": [
+            r"dni",
+            r"pas",
+            r"dniniepas",
+            r"documentorepresentante",
+        ],
         "titulo_representante": [r"titulo"],
         "hijos_escolarizacion_espana": [r"hijas", r"hijos", r"escolarizacion"],
     }
@@ -904,11 +834,18 @@ def suggest_mappings_for_fields(
             }
         )
     order_map = {key: idx for idx, key in enumerate(CANONICAL_FILL_PRIORITY)}
-    suggestions.sort(key=lambda item: (order_map.get(str(item.get("canonical_key") or ""), 999), str(item.get("selector") or "")))
+    suggestions.sort(
+        key=lambda item: (
+            order_map.get(str(item.get("canonical_key") or ""), 999),
+            str(item.get("selector") or ""),
+        )
+    )
     return suggestions
 
 
-def _split_name_for_spanish_fields(full_name: str, nationality: str = "") -> tuple[str, str, str]:
+def _split_name_for_spanish_fields(
+    full_name: str, nationality: str = ""
+) -> tuple[str, str, str]:
     raw = (full_name or "").strip()
     if not raw:
         return "", "", ""
@@ -960,14 +897,18 @@ def _normalize_nationality_for_spanish_select(value: str) -> str:
 
 def _save_html_snapshot(page: Page, out_dir: Path, prefix: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(prefix)}.html"
+    path = (
+        out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(prefix)}.html"
+    )
     path.write_text(page.content(), encoding="utf-8")
     return path
 
 
 def _save_screenshot(page: Page, out_dir: Path, prefix: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(prefix)}.png"
+    path = (
+        out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(prefix)}.png"
+    )
     page.screenshot(path=str(path), full_page=True)
     return path
 
@@ -978,19 +919,11 @@ def _append_filled(filled: list[str], field: str) -> None:
 
 
 def _rule_context(values: dict[str, str]) -> dict[str, str]:
-    return {k: str(v or "").strip() for k, v in values.items()}
+    return _rule_context_impl(values)
 
 
 def _eval_checked_when(rule: str, context: dict[str, str]) -> bool | None:
-    expr = (rule or "").strip()
-    if not expr:
-        return None
-    m = re.fullmatch(r"([a-z_]+)\s*==\s*['\"]([^'\"]+)['\"]", expr, re.I)
-    if not m:
-        return None
-    key = m.group(1).strip().lower()
-    expected = m.group(2).strip()
-    return context.get(key, "") == expected
+    return _eval_checked_when_impl(rule, context)
 
 
 def _set_check_if_possible(page: Page, selectors: list[str], checked: bool) -> bool:
@@ -1070,7 +1003,9 @@ def _apply_explicit_mappings(
                         if ok:
                             reason = "cp_inferred_fallback"
             else:
-                ok = _select_if_possible(page, [selector], value) or _set_if_possible(page, [selector], value)
+                ok = _select_if_possible(page, [selector], value) or _set_if_possible(
+                    page, [selector], value
+                )
         if ok:
             _append_filled(filled, canonical_key)
             applied.append(
@@ -1086,20 +1021,32 @@ def _apply_explicit_mappings(
     return applied
 
 
-def _apply_adapter_admin_tasas_pdf(page: Page, values: dict[str, str], filled: list[str]) -> None:
+def _apply_adapter_admin_tasas_pdf(
+    page: Page, values: dict[str, str], filled: list[str]
+) -> None:
     surname1, surname2, given_name = _split_name_for_spanish_fields(
         values.get("nombre_apellidos", ""),
         values.get("nacionalidad", ""),
     )
-    nationality = _normalize_nationality_for_spanish_select(values.get("nacionalidad", ""))
+    nationality = _normalize_nationality_for_spanish_select(
+        values.get("nacionalidad", "")
+    )
 
-    if values.get("nif_nie") and _set_if_possible(page, ["#Ctrl_NIFRem", "input[name='Ctrl_NIFRem']"], values["nif_nie"]):
+    if values.get("nif_nie") and _set_if_possible(
+        page, ["#Ctrl_NIFRem", "input[name='Ctrl_NIFRem']"], values["nif_nie"]
+    ):
         _append_filled(filled, "nif_nie")
-    if surname1 and _set_if_possible(page, ["#Ctrl_Apellido1", "input[name='Ctrl_Apellido1']"], surname1):
+    if surname1 and _set_if_possible(
+        page, ["#Ctrl_Apellido1", "input[name='Ctrl_Apellido1']"], surname1
+    ):
         _append_filled(filled, "primer_apellido")
-    if surname2 and _set_if_possible(page, ["#Ctrl_Apellido2", "input[name='Ctrl_Apellido2']"], surname2):
+    if surname2 and _set_if_possible(
+        page, ["#Ctrl_Apellido2", "input[name='Ctrl_Apellido2']"], surname2
+    ):
         _append_filled(filled, "segundo_apellido")
-    if given_name and _set_if_possible(page, ["#Ctrl_NombreRem", "input[name='Ctrl_NombreRem']"], given_name):
+    if given_name and _set_if_possible(
+        page, ["#Ctrl_NombreRem", "input[name='Ctrl_NombreRem']"], given_name
+    ):
         _append_filled(filled, "nombre")
     if nationality and _select_if_possible(
         page,
@@ -1113,17 +1060,33 @@ def _apply_adapter_admin_tasas_pdf(page: Page, values: dict[str, str], filled: l
         values["tipo_via"],
     ):
         _append_filled(filled, "tipo_via")
-    if values.get("nombre_via") and _set_if_possible(page, ["#Ctrl_ViaDom", "input[name='Ctrl_ViaDom']"], values["nombre_via"]):
+    if values.get("nombre_via") and _set_if_possible(
+        page, ["#Ctrl_ViaDom", "input[name='Ctrl_ViaDom']"], values["nombre_via"]
+    ):
         _append_filled(filled, "nombre_via")
-    if values.get("numero") and _set_if_possible(page, ["#Ctrl_NumeroDom", "input[name='Ctrl_NumeroDom']"], values["numero"]):
+    if values.get("numero") and _set_if_possible(
+        page, ["#Ctrl_NumeroDom", "input[name='Ctrl_NumeroDom']"], values["numero"]
+    ):
         _append_filled(filled, "numero")
-    if values.get("escalera") and _set_if_possible(page, ["#Ctrl_EscaleraDom", "input[name='Ctrl_EscaleraDom']"], values["escalera"]):
+    if values.get("escalera") and _set_if_possible(
+        page,
+        ["#Ctrl_EscaleraDom", "input[name='Ctrl_EscaleraDom']"],
+        values["escalera"],
+    ):
         _append_filled(filled, "escalera")
-    if values.get("piso") and _set_if_possible(page, ["#Ctrl_PisoDom", "input[name='Ctrl_PisoDom']"], values["piso"]):
+    if values.get("piso") and _set_if_possible(
+        page, ["#Ctrl_PisoDom", "input[name='Ctrl_PisoDom']"], values["piso"]
+    ):
         _append_filled(filled, "piso")
-    if values.get("puerta") and _set_if_possible(page, ["#Ctrl_PuertaDom", "input[name='Ctrl_PuertaDom']"], values["puerta"]):
+    if values.get("puerta") and _set_if_possible(
+        page, ["#Ctrl_PuertaDom", "input[name='Ctrl_PuertaDom']"], values["puerta"]
+    ):
         _append_filled(filled, "puerta")
-    if values.get("municipio") and _set_if_possible(page, ["#Ctrl_MunicipioDom", "input[name='Ctrl_MunicipioDom']"], values["municipio"]):
+    if values.get("municipio") and _set_if_possible(
+        page,
+        ["#Ctrl_MunicipioDom", "input[name='Ctrl_MunicipioDom']"],
+        values["municipio"],
+    ):
         _append_filled(filled, "municipio")
     province_selected = False
     if values.get("provincia"):
@@ -1142,22 +1105,36 @@ def _apply_adapter_admin_tasas_pdf(page: Page, values: dict[str, str], filled: l
             )
     if province_selected:
         _append_filled(filled, "provincia")
-    if values.get("cp") and _set_if_possible(page, ["#Ctrl_CPostalDom", "input[name='Ctrl_CPostalDom']"], values["cp"]):
+    if values.get("cp") and _set_if_possible(
+        page, ["#Ctrl_CPostalDom", "input[name='Ctrl_CPostalDom']"], values["cp"]
+    ):
         _append_filled(filled, "cp")
-    if values.get("telefono") and _set_if_possible(page, ["#Ctrl_TelefonoDom", "input[name='Ctrl_TelefonoDom']"], values["telefono"]):
+    if values.get("telefono") and _set_if_possible(
+        page,
+        ["#Ctrl_TelefonoDom", "input[name='Ctrl_TelefonoDom']"],
+        values["telefono"],
+    ):
         _append_filled(filled, "telefono")
 
 
-def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list[str]) -> None:
+def _apply_adapter_generic_html(
+    page: Page, values: dict[str, str], filled: list[str]
+) -> None:
     surname1, surname2, given_name = _split_name_for_spanish_fields(
         values.get("nombre_apellidos", ""),
         values.get("nacionalidad", ""),
     )
-    nationality = _normalize_nationality_for_spanish_select(values.get("nacionalidad", ""))
+    nationality = _normalize_nationality_for_spanish_select(
+        values.get("nacionalidad", "")
+    )
 
-    if values.get("nif_nie") and _fill_by_label(page, [r"NIF\s*/\s*NIE", r"NIE", r"NIF"], values["nif_nie"]):
+    if values.get("nif_nie") and _fill_by_label(
+        page, [r"NIF\s*/\s*NIE", r"NIE", r"NIF"], values["nif_nie"]
+    ):
         _append_filled(filled, "nif_nie")
-    if surname1 and _fill_by_label(page, [r"Primer apellido", r"Raz[oó]n Social"], surname1):
+    if surname1 and _fill_by_label(
+        page, [r"Primer apellido", r"Raz[oó]n Social"], surname1
+    ):
         _append_filled(filled, "primer_apellido")
     if surname2 and _fill_by_label(page, [r"Segundo apellido"], surname2):
         _append_filled(filled, "segundo_apellido")
@@ -1176,27 +1153,39 @@ def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list
         elif _fill_by_label(page, [r"Nacionalidad"], nationality):
             _append_filled(filled, "nacionalidad")
     if values.get("tipo_via"):
-        if _select_if_possible(
-            page,
-            [
-                "select[name*='via' i]",
-                "select[id*='via' i]",
-                "select[name*='calle' i]",
-            ],
-            values["tipo_via"],
-        ) or _set_if_possible(
-            page,
-            [
-                "#calle",
-                "input[name='calle']",
-                "input[id='calle']",
-            ],
-            values["tipo_via"],
-        ) or _fill_by_label(page, [r"Tipo\s+de\s+v[ií]a", r"Calle/plaza/Avda"], values["tipo_via"]):
+        if (
+            _select_if_possible(
+                page,
+                [
+                    "select[name*='via' i]",
+                    "select[id*='via' i]",
+                    "select[name*='calle' i]",
+                ],
+                values["tipo_via"],
+            )
+            or _set_if_possible(
+                page,
+                [
+                    "#calle",
+                    "input[name='calle']",
+                    "input[id='calle']",
+                ],
+                values["tipo_via"],
+            )
+            or _fill_by_label(
+                page, [r"Tipo\s+de\s+v[ií]a", r"Calle/plaza/Avda"], values["tipo_via"]
+            )
+        ):
             _append_filled(filled, "tipo_via")
-    if values.get("nombre_via") and _fill_by_label(page, [r"Nombre de la v[ií]a p[uú]blica", r"v[ií]a p[uú]blica"], values["nombre_via"]):
+    if values.get("nombre_via") and _fill_by_label(
+        page,
+        [r"Nombre de la v[ií]a p[uú]blica", r"v[ií]a p[uú]blica"],
+        values["nombre_via"],
+    ):
         _append_filled(filled, "nombre_via")
-    if values.get("numero") and _fill_by_label(page, [r"Num", r"N[uú]m"], values["numero"]):
+    if values.get("numero") and _fill_by_label(
+        page, [r"Num", r"N[uú]m"], values["numero"]
+    ):
         _append_filled(filled, "numero")
     if values.get("escalera") and _fill_by_label(page, [r"Esc"], values["escalera"]):
         _append_filled(filled, "escalera")
@@ -1204,7 +1193,9 @@ def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list
         _append_filled(filled, "piso")
     if values.get("puerta") and _fill_by_label(page, [r"Pta"], values["puerta"]):
         _append_filled(filled, "puerta")
-    if values.get("municipio") and _fill_by_label(page, [r"Municipio"], values["municipio"]):
+    if values.get("municipio") and _fill_by_label(
+        page, [r"Municipio"], values["municipio"]
+    ):
         _append_filled(filled, "municipio")
     if values.get("provincia"):
         if _select_if_possible(
@@ -1218,15 +1209,24 @@ def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list
             _append_filled(filled, "provincia")
         elif _fill_by_label(page, [r"Provincia"], values["provincia"]):
             _append_filled(filled, "provincia")
-    if values.get("cp") and _fill_by_label(page, [r"C\.?\s*Postal", r"C[oó]digo postal", r"CP"], values["cp"]):
+    if values.get("cp") and _fill_by_label(
+        page, [r"C\.?\s*Postal", r"C[oó]digo postal", r"CP"], values["cp"]
+    ):
         _append_filled(filled, "cp")
-    if values.get("telefono") and _fill_by_label(page, [r"Tel[eé]fono", r"Phone"], values["telefono"]):
+    if values.get("telefono") and _fill_by_label(
+        page, [r"Tel[eé]fono", r"Phone"], values["telefono"]
+    ):
         _append_filled(filled, "telefono")
 
     mapping: list[tuple[str, list[str], list[str]]] = [
         (
             "email",
-            ["#email", "input[type='email']", "input[name*='mail' i]", "input[name*='email' i]"],
+            [
+                "#email",
+                "input[type='email']",
+                "input[name*='mail' i]",
+                "input[name*='email' i]",
+            ],
             [r"mail", r"email", r"correo"],
         ),
         (
@@ -1248,7 +1248,9 @@ def _apply_adapter_generic_html(page: Page, values: dict[str, str], filled: list
         value = values.get(key, "")
         if not value:
             continue
-        if _set_if_possible(page, selectors, value) or _fill_by_label(page, labels, value):
+        if _set_if_possible(page, selectors, value) or _fill_by_label(
+            page, labels, value
+        ):
             _append_filled(filled, key)
 
 
@@ -1286,7 +1288,6 @@ def _dismiss_open_datepicker(page: Page) -> None:
 
 
 def _pick_html_adapters(target_url: str) -> list[tuple[str, Any]]:
-    raw = (target_url or "").lower()
     parsed = urlparse(target_url)
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower()
@@ -1319,8 +1320,16 @@ def autofill_existing_html_page(
                 LOGGER.exception("Adapter failed: %s", adapter_name)
     _dismiss_open_datepicker(page)
 
-    screenshot_path = _save_screenshot(page, out_dir, "target_html_autofill") if should_save_artifact_screenshots() else None
-    dom_snapshot_path = _save_html_snapshot(page, out_dir, "target_html_autofill") if is_template_debug_capture_enabled() else None
+    screenshot_path = (
+        _save_screenshot(page, out_dir, "target_html_autofill")
+        if should_save_artifact_screenshots()
+        else None
+    )
+    dom_snapshot_path = (
+        _save_html_snapshot(page, out_dir, "target_html_autofill")
+        if is_template_debug_capture_enabled()
+        else None
+    )
     return {
         "mode": "html_playwright",
         "adapter": attempted_adapters[0] if attempted_adapters else "unknown",
@@ -1371,271 +1380,32 @@ def _autofill_html_target(
 
 
 def _pdf_value_for_field(field_name: str, value_map: dict[str, str]) -> str:
-    n = _norm_text(field_name)
-    if not n:
-        return ""
-    if "nombreyapellidosdeltitular" in n:
-        return _strip_extra_spaces(
-            " ".join(
-                x
-                for x in [
-                    value_map.get("nombre", ""),
-                    value_map.get("primer_apellido", ""),
-                    value_map.get("segundo_apellido", ""),
-                ]
-                if x
-            )
-        )
-    if "piso" in n and "puert" in n:
-        return value_map.get("piso_puerta", "") or value_map.get("piso", "") or value_map.get("puerta", "")
-    if "pasaporte" in n or "passport" in n:
-        return value_map.get("pasaporte", "") or value_map.get("nif_nie", "")
-    if any(x in n for x in ["nif", "nie", "document"]):
-        return value_map.get("nif_nie", "")
-    if "primerapellido" in n or "apellido1" in n:
-        return value_map.get("primer_apellido", "")
-    if "segundoapellido" in n or "apellido2" in n:
-        return value_map.get("segundo_apellido", "")
-    if n == "nombre":
-        return value_map.get("nombre", "")
-    if "email" in n or "correo" in n:
-        return value_map.get("email", "")
-    if any(x in n for x in ["telefono", "phone", "movil"]):
-        return value_map.get("telefono", "")
-    if any(x in n for x in ["apellidosynombre", "nombreyapellidos", "fullname"]):
-        return value_map.get("nombre_apellidos", "")
-    if "apellidos" in n or "surname" in n:
-        return value_map.get("nombre_apellidos", "")
-    if n == "nombre" or "forename" in n:
-        return value_map.get("nombre_apellidos", "")
-    if "codigopostal" in n or n == "cp":
-        return value_map.get("cp", "")
-    if "municipio" in n or "city" in n:
-        return value_map.get("municipio", "")
-    if "provincia" in n or "province" in n:
-        return value_map.get("provincia", "")
-    if "tipovia" in n:
-        return value_map.get("tipo_via", "")
-    if "domicilioenespana" in n or n == "domicilio":
-        return value_map.get("domicilio_en_espana", "")
-    if "nombrevia" in n or "direccion" in n or "calle" in n:
-        return value_map.get("nombre_via", "")
-    if n in {"numero", "num"} or "numero" in n:
-        return value_map.get("numero", "")
-    if "fecha" in n and "nacimiento" not in n:
-        return value_map.get("fecha", "")
-    if "fechanacimiento" in n or "birth" in n:
-        return value_map.get("fecha_nacimiento", "")
-    if "importe" in n:
-        return value_map.get("importe_euros", "")
-    if "iban" in n:
-        return value_map.get("iban", "")
-    if "nacionalidad" in n or "nationality" in n:
-        return value_map.get("nacionalidad", "")
-    if "estadocivil" in n:
-        return value_map.get("estado_civil", "")
-    if "lugar" in n and "nac" in n:
-        return value_map.get("lugar_nacimiento", "")
-    if n == "pais" or "country" in n:
-        return value_map.get("pais_nacimiento", "")
-    if "padre" in n:
-        return value_map.get("nombre_padre", "")
-    if "madre" in n:
-        return value_map.get("nombre_madre", "")
-    if "representante" in n and "dni" not in n and "nie" not in n and "pas" not in n:
-        return value_map.get("representante_legal", "")
-    if "dniniepas" in n or ("representante" in n and any(x in n for x in ["dni", "nie", "pas"])):
-        return value_map.get("representante_documento", "")
-    if "titulo" in n:
-        return value_map.get("titulo_representante", "")
-    return ""
+    return _pdf_value_for_field_impl(
+        field_name,
+        value_map,
+        norm_text=_norm_text,
+        strip_extra_spaces=_strip_extra_spaces,
+    )
 
 
-def _build_nif_split_field_map(doc: fitz.Document, explicit_by_field: dict[str, str], value_map: dict[str, str]) -> dict[str, str]:
-    prefix = value_map.get("nif_nie_prefix", "")
-    number = value_map.get("nif_nie_number", "")
-    suffix = value_map.get("nif_nie_suffix", "")
-    if not (prefix and number and suffix):
-        return {}
-
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for page in doc:
-        for w in page.widgets() or []:
-            field_name = str((w.field_name or "")).strip()
-            if not field_name or field_name in seen:
-                continue
-            if explicit_by_field.get(field_name) != "nif_nie":
-                continue
-            rect = w.rect
-            candidates.append(
-                {
-                    "name": field_name,
-                    "x0": float(rect.x0),
-                    "y0": float(rect.y0),
-                    "width": float(rect.x1 - rect.x0),
-                }
-            )
-            seen.add(field_name)
-
-    if len(candidates) < 3:
-        return {}
-
-    # Common split layout: [prefix][number][suffix] with narrow/wide/narrow widths on the same row.
-    wide = sorted([c for c in candidates if c["width"] > 40.0], key=lambda c: (c["y0"], c["x0"]))
-    narrow = sorted([c for c in candidates if c["width"] <= 40.0], key=lambda c: (c["y0"], c["x0"]))
-    if not wide or len(narrow) < 2:
-        return {}
-
-    middle = wide[0]
-    same_row_narrow = [c for c in narrow if abs(c["y0"] - middle["y0"]) <= 25.0]
-    if len(same_row_narrow) >= 2:
-        same_row_narrow.sort(key=lambda c: c["x0"])
-        left = same_row_narrow[0]
-        right = same_row_narrow[-1]
-    else:
-        left, right = narrow[0], narrow[1]
-        if left["x0"] > right["x0"]:
-            left, right = right, left
-
-    return {
-        str(left["name"]): "nif_nie_prefix",
-        str(middle["name"]): "nif_nie_number",
-        str(right["name"]): "nif_nie_suffix",
-    }
-
-
-def _split_date_parts(value: str) -> tuple[str, str, str]:
-    raw = (value or "").strip()
-    if not raw:
-        return "", "", ""
-    m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", raw)
-    if m:
-        dd = m.group(1).zfill(2)
-        mm = m.group(2).zfill(2)
-        yy = m.group(3)
-        if len(yy) == 2:
-            yy = f"20{yy}"
-        return dd, mm, yy
-    m_iso = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
-    if m_iso:
-        return m_iso.group(3).zfill(2), m_iso.group(2).zfill(2), m_iso.group(1)
-    digits = re.sub(r"\D+", "", raw)
-    if len(digits) == 8:
-        return digits[0:2], digits[2:4], digits[4:8]
-    return "", "", ""
-
-
-def _build_date_split_field_values(doc: fitz.Document, explicit_by_field: dict[str, str], value_map: dict[str, str]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for date_key in ("fecha_nacimiento", "fecha"):
-        dd, mm, yy = _split_date_parts(value_map.get(date_key, ""))
-        if not (dd and mm and yy):
-            continue
-        candidates: list[dict[str, Any]] = []
-        for page in doc:
-            for w in page.widgets() or []:
-                field_name = str((w.field_name or "")).strip()
-                if not field_name:
-                    continue
-                if explicit_by_field.get(field_name) != date_key:
-                    continue
-                if "check" in str(getattr(w, "field_type_string", "") or "").lower():
-                    continue
-                rect = w.rect
-                candidates.append(
-                    {
-                        "name": field_name,
-                        "x0": float(rect.x0),
-                        "y0": float(rect.y0),
-                    }
-                )
-        if len(candidates) < 3:
-            continue
-        candidates.sort(key=lambda c: (c["y0"], c["x0"]))
-        row = [c for c in candidates if abs(c["y0"] - candidates[0]["y0"]) <= 25.0]
-        if len(row) < 3:
-            row = candidates[:3]
-        row.sort(key=lambda c: c["x0"])
-        out[row[0]["name"]] = dd
-        out[row[1]["name"]] = mm
-        out[row[2]["name"]] = yy
-    return out
-
-
-def build_date_split_field_values(
-    doc: fitz.Document,
-    explicit_by_field: dict[str, str],
-    value_map: dict[str, str],
+def _build_nif_split_field_map(
+    doc: fitz.Document, explicit_by_field: dict[str, str], value_map: dict[str, str]
 ) -> dict[str, str]:
-    return _build_date_split_field_values(doc, explicit_by_field, value_map)
+    return _build_nif_split_field_map_impl(doc, explicit_by_field, value_map)
 
 
-def infer_pdf_checkbox_expected(field_name: str, mapped_key: str, value_map: dict[str, str]) -> bool | None:
-    n = _norm_text(field_name)
-    sexo = (value_map.get("sexo", "") or "").strip().upper()
-    estado = (value_map.get("estado_civil", "") or "").strip().upper()
-    hijos = (value_map.get("hijos_escolarizacion_espana", "") or "").strip().upper()
-    name_upper = (field_name or "").strip().upper()
-    key = (mapped_key or "").strip().lower()
-
-    if key == "sexo":
-        if name_upper == "M":
-            return sexo == "M"
-        if name_upper == "CHKBOX":
-            return sexo in {"H", "X"}
-        return (("x" in n and sexo == "X") or ("h" in n and sexo == "H") or ("m" in n and sexo == "M"))
-    if key == "estado_civil":
-        if name_upper in {"C", "V", "D", "SP", "CHKBOX-0"}:
-            target = "S" if name_upper == "CHKBOX-0" else name_upper
-            return estado == target
-        return (
-            ("sp" in n and estado == "SP")
-            or ("s" in n and estado == "S")
-            or ("c" in n and estado == "C")
-            or ("v" in n and estado == "V")
-            or ("d" in n and estado == "D")
-        )
-    if key == "hijos_escolarizacion_espana":
-        if name_upper == "NO":
-            return hijos == "NO"
-        if "HIJAS" in name_upper or "HIJOS" in name_upper:
-            return hijos == "SI"
-        return ((("si" in n or n.endswith("s")) and hijos == "SI") or ("no" in n and hijos == "NO"))
-
-    if name_upper == "M":
-        return sexo == "M"
-    if name_upper == "CHKBOX":
-        return sexo in {"H", "X"}
-    if name_upper in {"C", "V", "D", "SP", "CHKBOX-0"}:
-        target = "S" if name_upper == "CHKBOX-0" else name_upper
-        return estado == target
-    if name_upper == "NO":
-        return hijos == "NO"
-    if "HIJAS" in name_upper or "HIJOS" in name_upper:
-        return hijos == "SI"
-    if "sexo" in n:
-        return (("x" in n and sexo == "X") or ("h" in n and sexo == "H") or ("m" in n and sexo == "M"))
-    if "estadocivil" in n:
-        return (
-            ("sp" in n and estado == "SP")
-            or ("s" in n and estado == "S")
-            or ("c" in n and estado == "C")
-            or ("v" in n and estado == "V")
-            or ("d" in n and estado == "D")
-        )
-    if "hijos" in n or "escolarizacion" in n:
-        return ((("si" in n or n.endswith("s")) and hijos == "SI") or ("no" in n and hijos == "NO"))
-    return None
+def infer_pdf_checkbox_expected(
+    field_name: str, mapped_key: str, value_map: dict[str, str]
+) -> bool | None:
+    return _infer_pdf_checkbox_expected_impl(
+        field_name, mapped_key, value_map, norm_text=_norm_text
+    )
 
 
-def _should_ignore_pdf_mapping(field_name: str, mapped_key: str, source: str, widget_type: str) -> bool:
-    _ = field_name
-    _ = mapped_key
-    _ = source
-    _ = widget_type
-    # Disabled by request: apply template mappings as-is.
-    return False
+def _should_ignore_pdf_mapping(
+    field_name: str, mapped_key: str, source: str, widget_type: str
+) -> bool:
+    return _should_ignore_pdf_mapping_impl(field_name, mapped_key, source, widget_type)
 
 
 def _autofill_pdf_target(
@@ -1652,7 +1422,9 @@ def _autofill_pdf_target(
     out_dir.mkdir(parents=True, exist_ok=True)
     source_path: Path | None = None
     if is_template_debug_capture_enabled():
-        source_path = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_source.pdf"
+        source_path = (
+            out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_source.pdf"
+        )
         source_path.write_bytes(data)
 
     value_map = _build_value_map(payload)
@@ -1688,12 +1460,20 @@ def _autofill_pdf_target(
         strict_explicit_mode = strict_template or bool(explicit_by_field)
         nif_split_field_map = _build_nif_split_field_map(
             doc,
-            {name: str(meta.get("key") or "") for name, meta in explicit_by_field.items() if str(meta.get("key") or "")},
+            {
+                name: str(meta.get("key") or "")
+                for name, meta in explicit_by_field.items()
+                if str(meta.get("key") or "")
+            },
             value_map,
         )
         date_split_field_values = _build_date_split_field_values(
             doc,
-            {name: str(meta.get("key") or "") for name, meta in explicit_by_field.items() if str(meta.get("key") or "")},
+            {
+                name: str(meta.get("key") or "")
+                for name, meta in explicit_by_field.items()
+                if str(meta.get("key") or "")
+            },
             value_map,
         )
         context = _rule_context(value_map)
@@ -1702,20 +1482,24 @@ def _autofill_pdf_target(
             name
             for name, meta in explicit_by_field.items()
             if str(meta.get("key") or "").strip().lower() == "sexo"
-            and str(meta.get("field_kind") or "").strip().lower() in {"checkbox", "radio"}
+            and str(meta.get("field_kind") or "").strip().lower()
+            in {"checkbox", "radio"}
         }
         estado_civil_fields = {
             name
             for name, meta in explicit_by_field.items()
             if str(meta.get("key") or "").strip().lower() == "estado_civil"
-            and str(meta.get("field_kind") or "").strip().lower() in {"checkbox", "radio"}
+            and str(meta.get("field_kind") or "").strip().lower()
+            in {"checkbox", "radio"}
         }
         if not sexo_fields or not estado_civil_fields:
             detected_sexo_fields: set[str] = set()
             detected_estado_fields: set[str] = set()
             for p in doc:
                 for widget in p.widgets() or []:
-                    widget_type = str(getattr(widget, "field_type_string", "") or "").lower()
+                    widget_type = str(
+                        getattr(widget, "field_type_string", "") or ""
+                    ).lower()
                     if "check" not in widget_type:
                         continue
                     name = str((widget.field_name or "")).strip()
@@ -1762,7 +1546,11 @@ def _autofill_pdf_target(
             effective_order = logical_order
             # Some official templates (e.g. EX-11) expose only two sexo checkboxes (H/M).
             # In that case we must not shift by X and should map left->H, right->M.
-            if allow_two_state_sex_fallback and len(row) == 2 and len(logical_order) >= 2:
+            if (
+                allow_two_state_sex_fallback
+                and len(row) == 2
+                and len(logical_order) >= 2
+            ):
                 effective_order = ["H", "M"]
             out: dict[str, bool] = {}
             for idx, (fname, _, _) in enumerate(row):
@@ -1804,7 +1592,10 @@ def _autofill_pdf_target(
                 widget.field_value = bool(checked)
                 widget.update()
             except Exception:
-                LOGGER.exception("Failed setting checkbox field '%s'", getattr(widget, "field_name", ""))
+                LOGGER.exception(
+                    "Failed setting checkbox field '%s'",
+                    getattr(widget, "field_name", ""),
+                )
 
         for page in doc:
             widgets = page.widgets() or []
@@ -1820,7 +1611,9 @@ def _autofill_pdf_target(
                 if field_name in nif_split_field_map:
                     mapped_key = nif_split_field_map[field_name]
                     mapped_source = "nif_split_inferred"
-                if _should_ignore_pdf_mapping(field_name, mapped_key, mapped_source, widget_type):
+                if _should_ignore_pdf_mapping(
+                    field_name, mapped_key, mapped_source, widget_type
+                ):
                     mapped_key = ""
                 if "check" in widget_type:
                     if field_name in sexo_fields:
@@ -1839,15 +1632,20 @@ def _autofill_pdf_target(
                         filled_count += 1
                         touched_fields.append(field_name)
                         continue
-                    checked_value: bool | None = None
+                    checked_value = None
                     if field_kind in {"checkbox", "radio"}:
-                        checked_value = _eval_checked_when(str(mapping_meta.get("checked_when") or ""), context)
+                        checked_value = _eval_checked_when(
+                            str(mapping_meta.get("checked_when") or ""), context
+                        )
                         if checked_value is not None:
                             checked_value = bool(
-                                checked_value and str(mapping_meta.get("match_value") or "").strip()
+                                checked_value
+                                and str(mapping_meta.get("match_value") or "").strip()
                             )
                     if checked_value is None:
-                        checked_value = infer_pdf_checkbox_expected(field_name, mapped_key, value_map)
+                        checked_value = infer_pdf_checkbox_expected(
+                            field_name, mapped_key, value_map
+                        )
                     if checked_value is not None:
                         _set_checkbox(w, checked_value)
                         filled_count += 1
@@ -1859,8 +1657,14 @@ def _autofill_pdf_target(
                                     "canonical_key": mapped_key,
                                     "field_kind": field_kind,
                                     "source": mapped_source or "explicit",
-                                    "confidence": float(mapping_meta.get("confidence") or 1.0),
-                                    "reason": "rule_evaluated_true" if checked_value else "rule_evaluated_false",
+                                    "confidence": float(
+                                        mapping_meta.get("confidence") or 1.0
+                                    ),
+                                    "reason": (
+                                        "rule_evaluated_true"
+                                        if checked_value
+                                        else "rule_evaluated_false"
+                                    ),
                                 }
                             )
                         continue
@@ -1911,7 +1715,12 @@ def _autofill_pdf_target(
                 doc.need_appearances(True)
             except Exception:
                 LOGGER.exception("Failed setting need_appearances on filled PDF.")
-        flatten_widgets = os.getenv("PDF_FLATTEN_WIDGETS", "0").strip().lower() not in {"0", "false", "no", "off"}
+        flatten_widgets = os.getenv("PDF_FLATTEN_WIDGETS", "0").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
         if flatten_widgets and hasattr(doc, "bake"):
             try:
                 # Some viewers render checkbox appearances incorrectly even when
@@ -1919,21 +1728,30 @@ def _autofill_pdf_target(
                 doc.bake(annots=False, widgets=True)
             except Exception:
                 LOGGER.exception("Failed baking widgets for filled PDF.")
-        filled_pdf = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_filled.pdf"
+        filled_pdf = (
+            out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_filled.pdf"
+        )
         doc.save(str(filled_pdf))
 
         screenshot_path: Path | None = None
         if should_save_artifact_screenshots():
             first_page = doc[0]
             pix = first_page.get_pixmap(dpi=160, alpha=False)
-            screenshot_path = out_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_pdf_preview.png"
+            screenshot_path = (
+                out_dir
+                / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_target_pdf_preview.png"
+            )
             pix.save(str(screenshot_path))
 
         warnings: list[str] = []
         if filled_count == 0:
-            warnings.append("PDF has no matched fillable fields; saved original structure for manual completion.")
+            warnings.append(
+                "PDF has no matched fillable fields; saved original structure for manual completion."
+            )
         if len(touched_fields) == 0 and len(doc) > 0:
-            warnings.append("No PDF widgets were filled. Check mappings and field names.")
+            warnings.append(
+                "No PDF widgets were filled. Check mappings and field names."
+            )
 
         return {
             "mode": "pdf_pymupdf",

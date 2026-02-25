@@ -81,11 +81,36 @@ export type MergeCandidate = {
   name_overlap: string[];
 };
 
+export type AddressAutofillResponse = {
+  document_id: string;
+  address_line: string;
+  normalized_address: string;
+  geocode_used: boolean;
+  domicilio: {
+    tipo_via: string;
+    nombre_via: string;
+    numero: string;
+    escalera: string;
+    piso: string;
+    puerta: string;
+    municipio: string;
+    provincia: string;
+    cp: string;
+  };
+};
+
 export type UploadResponse = {
   document_id: string;
+  client_id?: string;
+  source?: Record<string, unknown>;
   preview_url: string;
   form_url: string;
   target_url?: string;
+  source_kind_input?: string;
+  source_kind_detected?: string;
+  source_kind_confidence?: number;
+  source_kind_auto?: boolean;
+  source_kind_requires_review?: boolean;
   payload: Payload;
   document: Record<string, unknown>;
   missing_fields: string[];
@@ -93,6 +118,10 @@ export type UploadResponse = {
   manual_steps_required: string[];
   identity_match_found?: boolean;
   identity_source_document_id?: string;
+  workflow_stage?: string;
+  workflow_next_step?: string;
+  client_match?: MergeCandidate;
+  client_match_decision?: string;
   merge_candidates?: MergeCandidate[];
   enrichment_preview?: Array<{
     field: string;
@@ -100,13 +129,35 @@ export type UploadResponse = {
     suggested_value: string;
     source?: string;
   }>;
+  enrichment_skipped?: Array<{
+    field: string;
+    current_value: string;
+    suggested_value: string;
+    source?: string;
+    reason?: string;
+  }>;
+};
+
+export type ClientMatchResponse = {
+  document_id: string;
+  identity_match_found: boolean;
+  identity_source_document_id?: string;
+  client_match?: MergeCandidate;
+  client_match_decision?: string;
+  merge_candidates: MergeCandidate[];
+  workflow_stage: string;
+  workflow_next_step: string;
 };
 
 export type AutofillPreviewResponse = {
   document_id: string;
   form_url: string;
   status?: string;
-  error_code?: "TEMPLATE_NOT_FOUND" | "TEMPLATE_INVALID" | "FILL_PARTIAL" | "FILL_FAILED";
+  error_code?:
+    | "TEMPLATE_NOT_FOUND"
+    | "TEMPLATE_INVALID"
+    | "FILL_PARTIAL"
+    | "FILL_FAILED";
   message?: string;
   filled_pdf_url?: string;
 };
@@ -120,6 +171,13 @@ export type EnrichByIdentityResponse = {
   skipped_fields: string[];
   merge_candidates: MergeCandidate[];
   enrichment_preview: Array<{
+    field: string;
+    current_value: string;
+    suggested_value: string;
+    source?: string;
+    reason?: string;
+  }>;
+  enrichment_skipped?: Array<{
     field: string;
     current_value: string;
     suggested_value: string;
@@ -195,6 +253,7 @@ export type AnalyzeFieldsResponse = {
 
 export type SavedCrmDocument = {
   document_id: string;
+  client_id?: string;
   document_number: string;
   name: string;
   updated_at: string;

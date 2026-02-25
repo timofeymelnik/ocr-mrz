@@ -19,11 +19,15 @@ def _pick_form_fields(document: dict[str, Any]) -> dict[str, Any]:
             return fields
 
     for key in ["790_012", "mi_t", "visual_generic"]:
-        fields = (forms.get(key) or {}).get("fields") if isinstance(forms.get(key), dict) else {}
+        fields = (
+            (forms.get(key) or {}).get("fields")
+            if isinstance(forms.get(key), dict)
+            else {}
+        )
         if isinstance(fields, dict) and fields:
             return fields
 
-    fields = ((document.get("form_790_012") or {}).get("fields") or {})
+    fields = (document.get("form_790_012") or {}).get("fields") or {}
     if isinstance(fields, dict):
         return fields
     return {}
@@ -32,7 +36,9 @@ def _pick_form_fields(document: dict[str, Any]) -> dict[str, Any]:
 def build_crm_profile(document: dict[str, Any]) -> dict[str, Any]:
     card = document.get("card_extracted") or {}
     fields = _pick_form_fields(document)
-    pipeline_payload = (((document.get("pipeline") or {}).get("artifacts") or {}).get("form_payload_for_playwright") or {})
+    pipeline_payload = ((document.get("pipeline") or {}).get("artifacts") or {}).get(
+        "form_payload_for_playwright"
+    ) or {}
     extra = pipeline_payload.get("extra") if isinstance(pipeline_payload, dict) else {}
     if not isinstance(extra, dict):
         extra = {}
@@ -61,11 +67,21 @@ def build_crm_profile(document: dict[str, Any]) -> dict[str, Any]:
             "primary_number": identity_number,
             "nie_or_nif": _safe(card.get("nie_or_nif")),
             "passport": _safe(fields.get("pasaporte")),
-            "nationality": _safe(extra.get("nacionalidad")) or _safe(fields.get("nacionalidad")) or _safe(card.get("nacionalidad")),
-            "date_of_birth": _safe(extra.get("fecha_nacimiento")) or _safe(fields.get("fecha_nacimiento")) or _safe(card.get("fecha_nacimiento")),
-            "place_of_birth": _safe(extra.get("lugar_nacimiento")) or _safe(fields.get("lugar_nacimiento")) or _safe(card.get("lugar_nacimiento")),
-            "father_name": _safe(extra.get("nombre_padre")) or _safe(fields.get("nombre_padre")) or _safe(card.get("nombre_padre")),
-            "mother_name": _safe(extra.get("nombre_madre")) or _safe(fields.get("nombre_madre")) or _safe(card.get("nombre_madre")),
+            "nationality": _safe(extra.get("nacionalidad"))
+            or _safe(fields.get("nacionalidad"))
+            or _safe(card.get("nacionalidad")),
+            "date_of_birth": _safe(extra.get("fecha_nacimiento"))
+            or _safe(fields.get("fecha_nacimiento"))
+            or _safe(card.get("fecha_nacimiento")),
+            "place_of_birth": _safe(extra.get("lugar_nacimiento"))
+            or _safe(fields.get("lugar_nacimiento"))
+            or _safe(card.get("lugar_nacimiento")),
+            "father_name": _safe(extra.get("nombre_padre"))
+            or _safe(fields.get("nombre_padre"))
+            or _safe(card.get("nombre_padre")),
+            "mother_name": _safe(extra.get("nombre_madre"))
+            or _safe(fields.get("nombre_madre"))
+            or _safe(card.get("nombre_madre")),
         },
         "contacts": {
             "phone": _safe(fields.get("telefono")),

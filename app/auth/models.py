@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AuthUser(BaseModel):
@@ -20,6 +20,8 @@ class AuthUser(BaseModel):
 class LoginRequest(BaseModel):
     """Login request payload."""
 
+    model_config = ConfigDict(extra="forbid")
+
     email: str = Field(min_length=3)
     password: str = Field(min_length=1)
 
@@ -27,11 +29,15 @@ class LoginRequest(BaseModel):
 class RefreshRequest(BaseModel):
     """Refresh request payload."""
 
+    model_config = ConfigDict(extra="forbid")
+
     refresh_token: str = Field(min_length=1)
 
 
 class LogoutRequest(BaseModel):
     """Logout request payload."""
+
+    model_config = ConfigDict(extra="forbid")
 
     refresh_token: str | None = None
 

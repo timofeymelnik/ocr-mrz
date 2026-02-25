@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import logging
-import re
 import base64
+import logging
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +11,24 @@ from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.sync_api import Error, Locator, Page, TimeoutError as PlaywrightTimeoutError, expect, sync_playwright
+from playwright.sync_api import (
+    Error,
+    Locator,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    expect,
+    sync_playwright,
+)
+
+from app.autofill.form_helpers import (
+    check_download_content as _check_download_content,
+    download_filename as _download_filename,
+    extract_known_server_error as _extract_known_server_error,
+    is_blocked_page_html as _is_blocked_page_html,
+    is_pdf_bytes as _is_pdf_bytes,
+    slugify as _slugify,
+    split_amount as _split_amount,
+)
 
 LOGGER = logging.getLogger(__name__)
 FORM_URL = "https://sede.policia.gob.es/Tasa790_012/ImpresoRellenar"
@@ -26,7 +43,12 @@ def _chromium_executable_path() -> str | None:
     explicit = os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "").strip()
     if explicit:
         return explicit
-    for candidate in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"]:
+    for candidate in [
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+    ]:
         found = shutil.which(candidate)
         if found:
             return found
@@ -61,10 +83,6 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s.lower()).strip()
 
 
-def _slugify(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
-
-
 def _wait_visible(locator: Locator, timeout: int) -> None:
     expect(locator).to_be_visible(timeout=timeout)
 
@@ -86,19 +104,6 @@ def _is_locator_visible(locator: Locator) -> bool:
         return False
 
 
-def _is_blocked_page_html(html: str) -> bool:
-    text = (html or "").lower()
-    blocked_markers = [
-        "esta direcci",
-        "web est",
-        "bloqueada",
-        "página bloqueada",
-        "pagina bloqueada",
-        "contacte con el administrador",
-    ]
-    return sum(1 for marker in blocked_markers if marker in text) >= 2
-
-
 def _new_context(browser, *, accept_downloads: bool = True):
     return browser.new_context(
         accept_downloads=accept_downloads,
@@ -108,13 +113,32 @@ def _new_context(browser, *, accept_downloads: bool = True):
     )
 
 
-def _ensure_form_loaded(page: Page, timeout_ms: int, *, target_dir: Path | None = None, stage: str = "form") -> None:
+def _ensure_form_loaded(
+    page: Page, timeout_ms: int, *, target_dir: Path | None = None, stage: str = "form"
+) -> None:
     markers: list[tuple[str, Locator]] = [
-        ("heading", page.get_by_role("heading", name=re.compile(r"Tasa modelo\s*790", re.I))),
-        ("nif_input", page.get_by_label(re.compile(r"N\.?I\.?F\.?\s*/\s*N\.?I\.?E\.?", re.I))),
-        ("name_input", page.get_by_label(re.compile(r"Apellidos y nombre|raz[oó]n social", re.I))),
-        ("download_button", page.get_by_role("button", name=re.compile(r"Descargar impreso rellenado", re.I))),
-        ("nif_text", page.get_by_text(re.compile(r"N\.?I\.?F\.?\s*/\s*N\.?I\.?E\.?", re.I))),
+        (
+            "heading",
+            page.get_by_role("heading", name=re.compile(r"Tasa modelo\s*790", re.I)),
+        ),
+        (
+            "nif_input",
+            page.get_by_label(re.compile(r"N\.?I\.?F\.?\s*/\s*N\.?I\.?E\.?", re.I)),
+        ),
+        (
+            "name_input",
+            page.get_by_label(re.compile(r"Apellidos y nombre|raz[oó]n social", re.I)),
+        ),
+        (
+            "download_button",
+            page.get_by_role(
+                "button", name=re.compile(r"Descargar impreso rellenado", re.I)
+            ),
+        ),
+        (
+            "nif_text",
+            page.get_by_text(re.compile(r"N\.?I\.?F\.?\s*/\s*N\.?I\.?E\.?", re.I)),
+        ),
     ]
 
     deadline = monotonic() + (timeout_ms / 1000.0)
@@ -131,14 +155,19 @@ def _ensure_form_loaded(page: Page, timeout_ms: int, *, target_dir: Path | None 
             )
             if not target_dir:
                 raise RuntimeError(details)
-            dump_path = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(stage)}_blocked_page.html"
+            dump_path = (
+                target_dir
+                / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(stage)}_blocked_page.html"
+            )
             screenshot_path: Path | None = None
             try:
                 dump_path.write_text(html, encoding="utf-8")
             except Exception:
                 LOGGER.exception("Failed saving blocked-page dump.")
             try:
-                screenshot_path = _save_screenshot(page, target_dir, f"{stage}_blocked_page")
+                screenshot_path = _save_screenshot(
+                    page, target_dir, f"{stage}_blocked_page"
+                )
             except Exception:
                 LOGGER.exception("Failed saving blocked-page screenshot.")
             if screenshot_path:
@@ -148,7 +177,9 @@ def _ensure_form_loaded(page: Page, timeout_ms: int, *, target_dir: Path | None 
 
         for marker_name, locator in markers:
             if _is_locator_visible(locator):
-                LOGGER.info("Form shell detected via marker '%s' (stage=%s)", marker_name, stage)
+                LOGGER.info(
+                    "Form shell detected via marker '%s' (stage=%s)", marker_name, stage
+                )
                 return
         page.wait_for_timeout(200)
 
@@ -156,8 +187,11 @@ def _ensure_form_loaded(page: Page, timeout_ms: int, *, target_dir: Path | None 
     if not target_dir:
         raise RuntimeError(details)
 
-    dump_path = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(stage)}_form_not_ready.html"
-    screenshot_path: Path | None = None
+    dump_path = (
+        target_dir
+        / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_slugify(stage)}_form_not_ready.html"
+    )
+    screenshot_path = None
     try:
         dump_path.write_text(page.content(), encoding="utf-8")
     except Exception:
@@ -172,7 +206,9 @@ def _ensure_form_loaded(page: Page, timeout_ms: int, *, target_dir: Path | None 
     raise RuntimeError(details)
 
 
-def _fill_if_present(page: Page, label: str, value: str, timeout: int, fallback_hint: str | None = None) -> bool:
+def _fill_if_present(
+    page: Page, label: str, value: str, timeout: int, fallback_hint: str | None = None
+) -> bool:
     if not value:
         return False
 
@@ -187,15 +223,17 @@ def _fill_if_present(page: Page, label: str, value: str, timeout: int, fallback_
         pass
 
     if fallback_hint:
-        input_box = _input_by_near_text(page, fallback_hint)
-        if input_box:
-            _wait_visible(input_box, timeout)
-            input_box.fill(value, timeout=timeout)
+        fallback_input = _input_by_near_text(page, fallback_hint)
+        if fallback_input:
+            _wait_visible(fallback_input, timeout)
+            fallback_input.fill(value, timeout=timeout)
             return True
     return False
 
 
-def _fill_required(page: Page, label: str, value: str, timeout: int, fallback_hint: str | None = None) -> None:
+def _fill_required(
+    page: Page, label: str, value: str, timeout: int, fallback_hint: str | None = None
+) -> None:
     if not value:
         raise ValueError(f"Required payload field is empty for: {label}")
     ok = _fill_if_present(page, label, value, timeout, fallback_hint=fallback_hint)
@@ -204,7 +242,9 @@ def _fill_required(page: Page, label: str, value: str, timeout: int, fallback_hi
 
 
 def _input_by_near_text(page: Page, text_hint: str) -> Locator | None:
-    containers = page.locator("div,td,tr,section").filter(has_text=re.compile(re.escape(text_hint), re.I))
+    containers = page.locator("div,td,tr,section").filter(
+        has_text=re.compile(re.escape(text_hint), re.I)
+    )
     for i in range(min(containers.count(), 5)):
         item = containers.nth(i)
         candidate = item.locator("input[type='text'], input:not([type])").first
@@ -214,7 +254,11 @@ def _input_by_near_text(page: Page, text_hint: str) -> Locator | None:
 
 
 def _select_radio_by_text(page: Page, text: str, timeout: int) -> None:
-    wrapper = page.locator("label,div,span,tr,td").filter(has_text=re.compile(re.escape(text), re.I)).first
+    wrapper = (
+        page.locator("label,div,span,tr,td")
+        .filter(has_text=re.compile(re.escape(text), re.I))
+        .first
+    )
     _wait_visible(wrapper, timeout)
     radio = wrapper.locator("input[type='radio']").first
     if radio.count() == 0:
@@ -224,18 +268,24 @@ def _select_radio_by_text(page: Page, text: str, timeout: int) -> None:
 
 
 def _select_forma_pago(page: Page, forma_pago: str, timeout: int) -> None:
-    ingreso_block = page.locator("div").filter(has_text=re.compile(r"Forma de pago", re.I)).first
+    ingreso_block = (
+        page.locator("div").filter(has_text=re.compile(r"Forma de pago", re.I)).first
+    )
     _wait_visible(ingreso_block, timeout)
 
     target_text = "Adeudo en cuenta" if forma_pago == "adeudo" else "En efectivo"
-    candidate = ingreso_block.locator("div,label,span").filter(
-        has_text=re.compile(re.escape(target_text), re.I)
-    ).first
+    candidate = (
+        ingreso_block.locator("div,label,span")
+        .filter(has_text=re.compile(re.escape(target_text), re.I))
+        .first
+    )
     _wait_visible(candidate, timeout)
 
     radio = candidate.locator("input[type='radio']").first
     if radio.count() == 0:
-        radio = page.get_by_role("radio", name=re.compile(re.escape(target_text), re.I)).first
+        radio = page.get_by_role(
+            "radio", name=re.compile(re.escape(target_text), re.I)
+        ).first
     if radio.count() == 0:
         radios = ingreso_block.locator("input[type='radio']")
         idx = 1 if forma_pago == "adeudo" else 0
@@ -319,7 +369,9 @@ def _fill_complementaria(page: Page, payload: dict[str, Any], timeout: int) -> N
     num = _safe_value(payload, "autoliquidacion", "num_justificante")
     importe = payload.get("autoliquidacion", {}).get("importe_complementaria")
     if not num or importe in ("", None):
-        raise ValueError("Complementaria selected but num_justificante/importe_complementaria are missing.")
+        raise ValueError(
+            "Complementaria selected but num_justificante/importe_complementaria are missing."
+        )
 
     digits = re.sub(r"\D", "", num)
     enabled_boxes = page.locator("input[type='text']:enabled")
@@ -332,7 +384,11 @@ def _fill_complementaria(page: Page, payload: dict[str, Any], timeout: int) -> N
         target_boxes.append(c)
     if len(target_boxes) < 7:
         # fallback: search around Num. Justificante block
-        block = page.locator("div").filter(has_text=re.compile(r"Num\.?\s*Justificante", re.I)).first
+        block = (
+            page.locator("div")
+            .filter(has_text=re.compile(r"Num\.?\s*Justificante", re.I))
+            .first
+        )
         local_enabled = block.locator("input[type='text']:enabled")
         target_boxes = [local_enabled.nth(i) for i in range(local_enabled.count())]
     if len(target_boxes) < 7:
@@ -350,13 +406,6 @@ def _fill_complementaria(page: Page, payload: dict[str, Any], timeout: int) -> N
         dec = page.get_by_label(re.compile(r"parte decimal", re.I))
         if dec.count():
             dec.first.fill(decimal_part, timeout=timeout)
-
-
-def _split_amount(amount: Any) -> tuple[str, str]:
-    val = float(amount)
-    euros = int(val)
-    cents = int(round((val - euros) * 100))
-    return str(euros), f"{cents:02d}"
 
 
 def _find_group_table(page: Page, group_text: str, timeout: int) -> Locator:
@@ -381,7 +430,11 @@ def _select_tramite(page: Page, payload: dict[str, Any], timeout: int) -> None:
         raise ValueError("tramite.grupo and tramite.opcion are required.")
 
     table = _find_group_table(page, group_text, timeout)
-    row = table.locator("tr").filter(has_text=re.compile(re.escape(option_text), re.I)).first
+    row = (
+        table.locator("tr")
+        .filter(has_text=re.compile(re.escape(option_text), re.I))
+        .first
+    )
     if row.count() == 0:
         raise ValueError(f"No trámite option row matched: {option_text}")
 
@@ -391,14 +444,23 @@ def _select_tramite(page: Page, payload: dict[str, Any], timeout: int) -> None:
     LOGGER.info("Trámite selected: group='%s' option='%s'", group_text, option_text)
 
     row_text = _norm(row.inner_text())
-    needs_qty = any(k in row_text for k in ["cada día", "certificados o informes", "por cada documento"])
-    qty = _safe_value(payload, "tramite", "cantidad") or _safe_value(payload, "tramite", "dias")
+    needs_qty = any(
+        k in row_text
+        for k in ["cada día", "certificados o informes", "por cada documento"]
+    )
+    qty = _safe_value(payload, "tramite", "cantidad") or _safe_value(
+        payload, "tramite", "dias"
+    )
     if needs_qty:
         if not qty:
-            raise ValueError("Selected trámite requires tramite.cantidad or tramite.dias.")
+            raise ValueError(
+                "Selected trámite requires tramite.cantidad or tramite.dias."
+            )
         row_input = row.locator("input[type='text'], input:not([type])").first
         if row_input.count() == 0:
-            raise RuntimeError("Selected trámite appears to need quantity but no editable input was found in row.")
+            raise RuntimeError(
+                "Selected trámite appears to need quantity but no editable input was found in row."
+            )
         row_input.fill(qty, timeout=timeout)
         LOGGER.info("Trámite quantity set: %s", qty)
 
@@ -411,8 +473,16 @@ def _save_screenshot(page: Page, download_dir: Path, name: str) -> Path:
     return path
 
 
-def _fill_main_sections(page: Page, payload: dict[str, Any], timeout: int, *, select_tramite: bool = True) -> None:
-    _fill_required(page, "N.I.F./N.I.E.", _safe_value(payload, "identificacion", "nif_nie"), timeout, "N.I.F./N.I.E")
+def _fill_main_sections(
+    page: Page, payload: dict[str, Any], timeout: int, *, select_tramite: bool = True
+) -> None:
+    _fill_required(
+        page,
+        "N.I.F./N.I.E.",
+        _safe_value(payload, "identificacion", "nif_nie"),
+        timeout,
+        "N.I.F./N.I.E",
+    )
     _fill_required(
         page,
         "Apellidos y nombre o razón social",
@@ -422,19 +492,69 @@ def _fill_main_sections(page: Page, payload: dict[str, Any], timeout: int, *, se
     )
 
     # Domicilio
-    _fill_required(page, "Tipo de vía", _safe_value(payload, "domicilio", "tipo_via"), timeout, "Tipo de vía")
-    _fill_required(page, "Nombre de la vía pública", _safe_value(payload, "domicilio", "nombre_via"), timeout, "Nombre de la vía pública")
-    _fill_required(page, "Núm.", _safe_value(payload, "domicilio", "numero"), timeout, "Núm.")
-    _fill_if_present(page, "Escalera", _safe_value(payload, "domicilio", "escalera"), timeout, "Escalera")
-    _fill_if_present(page, "Piso", _safe_value(payload, "domicilio", "piso"), timeout, "Piso")
-    _fill_if_present(page, "Puerta", _safe_value(payload, "domicilio", "puerta"), timeout, "Puerta")
-    _fill_if_present(page, "Teléfono", _safe_value(payload, "domicilio", "telefono"), timeout, "Teléfono")
-    _fill_required(page, "Municipio", _safe_value(payload, "domicilio", "municipio"), timeout, "Municipio")
-    _fill_required(page, "Provincia", _safe_value(payload, "domicilio", "provincia"), timeout, "Provincia")
-    _fill_required(page, "Código Postal", _safe_value(payload, "domicilio", "cp"), timeout, "Código Postal")
+    _fill_required(
+        page,
+        "Tipo de vía",
+        _safe_value(payload, "domicilio", "tipo_via"),
+        timeout,
+        "Tipo de vía",
+    )
+    _fill_required(
+        page,
+        "Nombre de la vía pública",
+        _safe_value(payload, "domicilio", "nombre_via"),
+        timeout,
+        "Nombre de la vía pública",
+    )
+    _fill_required(
+        page, "Núm.", _safe_value(payload, "domicilio", "numero"), timeout, "Núm."
+    )
+    _fill_if_present(
+        page,
+        "Escalera",
+        _safe_value(payload, "domicilio", "escalera"),
+        timeout,
+        "Escalera",
+    )
+    _fill_if_present(
+        page, "Piso", _safe_value(payload, "domicilio", "piso"), timeout, "Piso"
+    )
+    _fill_if_present(
+        page, "Puerta", _safe_value(payload, "domicilio", "puerta"), timeout, "Puerta"
+    )
+    _fill_if_present(
+        page,
+        "Teléfono",
+        _safe_value(payload, "domicilio", "telefono"),
+        timeout,
+        "Teléfono",
+    )
+    _fill_required(
+        page,
+        "Municipio",
+        _safe_value(payload, "domicilio", "municipio"),
+        timeout,
+        "Municipio",
+    )
+    _fill_required(
+        page,
+        "Provincia",
+        _safe_value(payload, "domicilio", "provincia"),
+        timeout,
+        "Provincia",
+    )
+    _fill_required(
+        page,
+        "Código Postal",
+        _safe_value(payload, "domicilio", "cp"),
+        timeout,
+        "Código Postal",
+    )
 
     # Autoliquidacion
-    autoliquidacion_tipo = _safe_value(payload, "autoliquidacion", "tipo").lower() or "principal"
+    autoliquidacion_tipo = (
+        _safe_value(payload, "autoliquidacion", "tipo").lower() or "principal"
+    )
     if autoliquidacion_tipo == "complementaria":
         _select_radio_by_text(page, "Complementaria", timeout)
         _fill_complementaria(page, payload, timeout)
@@ -447,27 +567,29 @@ def _fill_main_sections(page: Page, payload: dict[str, Any], timeout: int, *, se
         _select_tramite(page, payload, timeout)
 
     # Declarante
-    _fill_required(page, "Localidad", _safe_value(payload, "declarante", "localidad"), timeout, "Localidad")
-    _fill_required(page, "Fecha", _safe_value(payload, "declarante", "fecha"), timeout, "Fecha")
+    _fill_required(
+        page,
+        "Localidad",
+        _safe_value(payload, "declarante", "localidad"),
+        timeout,
+        "Localidad",
+    )
+    _fill_required(
+        page, "Fecha", _safe_value(payload, "declarante", "fecha"), timeout, "Fecha"
+    )
 
     # Ingreso
     forma_pago = _safe_value(payload, "ingreso", "forma_pago").lower()
     if forma_pago == "adeudo":
         _select_forma_pago(page, "adeudo", timeout)
         iban = _safe_value(payload, "ingreso", "iban")
-        _fill_if_present(page, "Código IBAN de la cuenta", iban, timeout, "Código IBAN de la cuenta")
+        _fill_if_present(
+            page, "Código IBAN de la cuenta", iban, timeout, "Código IBAN de la cuenta"
+        )
         LOGGER.info("Forma de pago: adeudo.")
     else:
         _select_forma_pago(page, "efectivo", timeout)
         LOGGER.info("Forma de pago: efectivo.")
-
-
-def _download_filename(payload: dict[str, Any], suggested_name: str) -> str:
-    prefix = _safe_value(payload, "download", "filename_prefix") or "tasa790_012"
-    nif_nie = _safe_value(payload, "identificacion", "nif_nie") or "unknown"
-    day = datetime.now().strftime("%Y%m%d")
-    ext = Path(suggested_name or "document.pdf").suffix or ".pdf"
-    return f"{prefix}_{nif_nie}_{day}{ext}"
 
 
 def _mandatory_page_checks(page: Page, timeout: int) -> list[str]:
@@ -522,29 +644,6 @@ def _mandatory_page_checks(page: Page, timeout: int) -> list[str]:
     return issues
 
 
-def _check_download_content(path: Path) -> tuple[bool, str]:
-    head = path.read_bytes()[:512].lower()
-    if b"<html" in head or b"<!doctype html" in head:
-        return False, "Downloaded content appears to be HTML, not a document."
-    return True, ""
-
-
-def _is_pdf_bytes(content: bytes) -> bool:
-    return content.startswith(b"%PDF")
-
-
-def _extract_known_server_error(body: bytes) -> str:
-    text = body.decode("utf-8", errors="ignore")
-    normalized = text.lower()
-    if "error en captcha" in normalized:
-        return "Server returned CAPTCHA error: invalid/expired captcha. Enter the NEW captcha shown by the page and retry."
-    if "debe introducir una forma de pago" in normalized:
-        return "Server validation error: forma de pago not selected."
-    if "debe seleccionar uno de los trámites" in normalized:
-        return "Server validation error: trámite option not selected."
-    return ""
-
-
 def _save_from_popup_page(
     *,
     popup: Page,
@@ -571,17 +670,25 @@ def _save_from_popup_page(
     content_type = (response.headers.get("content-type") or "").lower()
     suggested = Path(urlparse(url).path).name or "document.pdf"
     if _is_pdf_bytes(content):
-        filename = _download_filename(payload, suggested if suggested.endswith(".pdf") else "document.pdf")
+        filename = _download_filename(
+            payload, suggested if suggested.endswith(".pdf") else "document.pdf"
+        )
         output_path = target_dir / filename
         output_path.write_bytes(content)
         return output_path
 
-    dump = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_popup_response.html"
+    dump = (
+        target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_popup_response.html"
+    )
     try:
         dump.write_bytes(content)
     except Exception:
         pass
-    LOGGER.error("Popup did not return real PDF bytes. Content-Type=%s, dump=%s", content_type, dump)
+    LOGGER.error(
+        "Popup did not return real PDF bytes. Content-Type=%s, dump=%s",
+        content_type,
+        dump,
+    )
     return None
 
 
@@ -600,10 +707,12 @@ def _save_from_page_context(
             response = context.request.get(url, timeout=timeout_ms)
             if response.ok:
                 body = response.body()
-                ctype = (response.headers.get("content-type") or "").lower()
                 if _is_pdf_bytes(body):
                     suggested = Path(urlparse(url).path).name or "document.pdf"
-                    out = target_dir / _download_filename(payload, suggested if suggested.endswith(".pdf") else "document.pdf")
+                    out = target_dir / _download_filename(
+                        payload,
+                        suggested if suggested.endswith(".pdf") else "document.pdf",
+                    )
                     out.write_bytes(body)
                     return out
         except Exception:
@@ -644,12 +753,16 @@ def _save_from_page_context(
                 out.write_bytes(data)
                 return out
     except Exception:
-        LOGGER.exception("Blob/context PDF extraction failed from page: %s", current_page.url)
+        LOGGER.exception(
+            "Blob/context PDF extraction failed from page: %s", current_page.url
+        )
 
     return None
 
 
-def _save_from_form_fetch(page: Page, payload: dict[str, Any], target_dir: Path, timeout_ms: int) -> Path | None:
+def _save_from_form_fetch(
+    page: Page, payload: dict[str, Any], target_dir: Path, timeout_ms: int
+) -> Path | None:
     try:
         result = page.evaluate(
             """async () => {
@@ -694,7 +807,9 @@ def _save_from_form_fetch(page: Page, payload: dict[str, Any], target_dir: Path,
     status = int(result.get("status", 0) or 0)
     b64 = str(result.get("b64", ""))
     if not b64:
-        LOGGER.warning("Form fetch fallback returned empty body. status=%s ctype=%s", status, ctype)
+        LOGGER.warning(
+            "Form fetch fallback returned empty body. status=%s ctype=%s", status, ctype
+        )
         return None
 
     try:
@@ -704,7 +819,10 @@ def _save_from_form_fetch(page: Page, payload: dict[str, Any], target_dir: Path,
         return None
 
     if not _is_pdf_bytes(body):
-        dump = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_form_fetch_response.bin"
+        dump = (
+            target_dir
+            / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_form_fetch_response.bin"
+        )
         dump.write_bytes(body)
         LOGGER.warning(
             "Form fetch fallback returned non-PDF bytes. status=%s ctype=%s dump=%s",
@@ -728,7 +846,9 @@ def fill_and_download(
     timeout_ms: int = 20000,
     download_dir: str | None = None,
 ) -> Path:
-    target_dir = Path(download_dir or _safe_value(payload, "download", "dir") or "./downloads").resolve()
+    target_dir = Path(
+        download_dir or _safe_value(payload, "download", "dir") or "./downloads"
+    ).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
@@ -775,16 +895,22 @@ def fill_and_download(
         try:
             LOGGER.info("Navigating to form: %s", FORM_URL)
             page.goto(FORM_URL, wait_until="domcontentloaded")
-            _ensure_form_loaded(page, timeout_ms, target_dir=target_dir, stage="auto_submit_open")
+            _ensure_form_loaded(
+                page, timeout_ms, target_dir=target_dir, stage="auto_submit_open"
+            )
 
             _fill_main_sections(page, payload, timeout_ms)
             shot1 = _save_screenshot(page, target_dir, "after_fill")
             LOGGER.info("Screenshot saved: %s", shot1)
 
-            manual_captcha = str(payload.get("captcha", {}).get("manual", True)).lower() != "false"
+            manual_captcha = (
+                str(payload.get("captcha", {}).get("manual", True)).lower() != "false"
+            )
             if manual_captcha:
                 LOGGER.info("Reached CAPTCHA step, waiting for manual solve.")
-                print("Введи CAPTCHA на странице и нажми Enter в терминале, чтобы продолжить.")
+                print(
+                    "Введи CAPTCHA на странице и нажми Enter в терминале, чтобы продолжить."
+                )
                 input()
 
             shot2 = _save_screenshot(page, target_dir, "before_download")
@@ -792,22 +918,35 @@ def fill_and_download(
 
             page_issues = _mandatory_page_checks(page, timeout_ms)
             if page_issues:
-                shot = _save_screenshot(page, target_dir, "before_download_validation_error")
+                shot = _save_screenshot(
+                    page, target_dir, "before_download_validation_error"
+                )
                 raise RuntimeError(
                     "Form still has missing mandatory values before download:\n"
                     + "\n".join(page_issues)
                     + f"\nScreenshot: {shot}"
                 )
 
-            download_button = page.get_by_role("button", name=re.compile(r"Descargar impreso rellenado", re.I))
+            download_button = page.get_by_role(
+                "button", name=re.compile(r"Descargar impreso rellenado", re.I)
+            )
             _wait_visible(download_button, timeout_ms)
 
-            manual_download = str(payload.get("download", {}).get("manual_confirm", True)).lower() != "false"
+            manual_download = (
+                str(payload.get("download", {}).get("manual_confirm", True)).lower()
+                != "false"
+            )
             download = None
             if manual_download:
-                LOGGER.info("Manual confirm mode is enabled: waiting for user click on download/confirm.")
-                print("Нажмите кнопку скачивания/подтверждения в окне Chromium вручную.")
-                print("После клика здесь ничего вводить не нужно: ожидаю событие download...")
+                LOGGER.info(
+                    "Manual confirm mode is enabled: waiting for user click on download/confirm."
+                )
+                print(
+                    "Нажмите кнопку скачивания/подтверждения в окне Chromium вручную."
+                )
+                print(
+                    "После клика здесь ничего вводить не нужно: ожидаю событие download..."
+                )
                 manual_timeout = max(timeout_ms, 10 * 60 * 1000)
                 try:
                     download = page.wait_for_event("download", timeout=manual_timeout)
@@ -829,7 +968,9 @@ def fill_and_download(
                     html_dump = target_dir / f"{output_path.stem}_response_dump.html"
                     html_dump.write_text(page.content(), encoding="utf-8")
                     shot = _save_screenshot(page, target_dir, "download_html_error")
-                    raise RuntimeError(f"{reason} Dump: {html_dump}. Screenshot: {shot}")
+                    raise RuntimeError(
+                        f"{reason} Dump: {html_dump}. Screenshot: {shot}"
+                    )
 
                 shot3 = _save_screenshot(page, target_dir, "after_download")
                 LOGGER.info("Screenshot saved: %s", shot3)
@@ -837,10 +978,17 @@ def fill_and_download(
                 return output_path
 
             if manual_download:
-                html_dump = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_manual_download_timeout_dump.html"
+                html_dump = (
+                    target_dir
+                    / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_manual_download_timeout_dump.html"
+                )
                 html_dump.write_text(page.content(), encoding="utf-8")
                 shot = _save_screenshot(page, target_dir, "manual_download_timeout")
-                LOGGER.error("Manual download did not start in time. Dump saved: %s ; screenshot: %s", html_dump, shot)
+                LOGGER.error(
+                    "Manual download did not start in time. Dump saved: %s ; screenshot: %s",
+                    html_dump,
+                    shot,
+                )
                 raise RuntimeError(
                     "Manual download/confirm was not completed in time. "
                     f"Please click download/confirm in browser and retry. Dump: {html_dump}. Screenshot: {shot}"
@@ -854,19 +1002,29 @@ def fill_and_download(
                         if not body:
                             continue
                         ctype = (resp.headers.get("content-type") or "").lower()
-                        suggested = Path(urlparse(resp.url).path).name or f"network_capture_{idx}.pdf"
+                        suggested = (
+                            Path(urlparse(resp.url).path).name
+                            or f"network_capture_{idx}.pdf"
+                        )
                         out = target_dir / _download_filename(
                             payload,
                             suggested if suggested.endswith(".pdf") else "document.pdf",
                         )
                         if _is_pdf_bytes(body):
                             out.write_bytes(body)
-                            shot3 = _save_screenshot(page, target_dir, "after_download_network_capture")
+                            shot3 = _save_screenshot(
+                                page, target_dir, "after_download_network_capture"
+                            )
                             LOGGER.info("Screenshot saved: %s", shot3)
-                            LOGGER.info("Downloaded file saved from network response: %s", out)
+                            LOGGER.info(
+                                "Downloaded file saved from network response: %s", out
+                            )
                             return out
 
-                        raw_dump = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_network_response_{idx}.bin"
+                        raw_dump = (
+                            target_dir
+                            / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_network_response_{idx}.bin"
+                        )
                         raw_dump.write_bytes(body)
                         server_err = _extract_known_server_error(body)
                         if server_err:
@@ -890,13 +1048,22 @@ def fill_and_download(
                         body = replay_resp.body()
                         ctype = (replay_resp.headers.get("content-type") or "").lower()
                         if body and _is_pdf_bytes(body):
-                            out = target_dir / _download_filename(payload, f"replay_{idx}.pdf")
+                            out = target_dir / _download_filename(
+                                payload, f"replay_{idx}.pdf"
+                            )
                             out.write_bytes(body)
-                            shot3 = _save_screenshot(page, target_dir, "after_download_replay_fetch")
+                            shot3 = _save_screenshot(
+                                page, target_dir, "after_download_replay_fetch"
+                            )
                             LOGGER.info("Screenshot saved: %s", shot3)
-                            LOGGER.info("Downloaded file saved from replayed request: %s", out)
+                            LOGGER.info(
+                                "Downloaded file saved from replayed request: %s", out
+                            )
                             return out
-                        dump = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_replay_response_{idx}.bin"
+                        dump = (
+                            target_dir
+                            / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_replay_response_{idx}.bin"
+                        )
                         dump.write_bytes(body or b"")
                         server_err = _extract_known_server_error(body or b"")
                         if server_err:
@@ -911,13 +1078,17 @@ def fill_and_download(
                     except RuntimeError:
                         raise
                     except Exception:
-                        LOGGER.exception("Failed replaying captured descargar request #%s", idx)
+                        LOGGER.exception(
+                            "Failed replaying captured descargar request #%s", idx
+                        )
 
             # Fallbacks: popup tab, same tab navigation, blob PDF viewer
             try:
                 candidate_pages: list[Page] = []
                 candidate_pages.extend(popup_pages)
-                candidate_pages.extend([p for p in context.pages if p not in candidate_pages])
+                candidate_pages.extend(
+                    [p for p in context.pages if p not in candidate_pages]
+                )
                 if page not in candidate_pages:
                     candidate_pages.insert(0, page)
 
@@ -927,13 +1098,19 @@ def fill_and_download(
                     except Exception:
                         pass
                     try:
-                        shot_popup = _save_screenshot(cand, target_dir, f"popup_after_click_{idx}")
+                        shot_popup = _save_screenshot(
+                            cand, target_dir, f"popup_after_click_{idx}"
+                        )
                         LOGGER.info("Candidate page screenshot saved: %s", shot_popup)
                     except Exception:
                         pass
 
                     saved = None
-                    if cand.url and cand.url not in {"about:blank", FORM_URL} and not cand.url.startswith("blob:"):
+                    if (
+                        cand.url
+                        and cand.url not in {"about:blank", FORM_URL}
+                        and not cand.url.startswith("blob:")
+                    ):
                         saved = _save_from_popup_page(
                             popup=cand,
                             context=context,
@@ -952,7 +1129,9 @@ def fill_and_download(
                     if saved:
                         ok, reason = _check_download_content(saved)
                         if ok:
-                            shot3 = _save_screenshot(page, target_dir, "after_download_popup")
+                            shot3 = _save_screenshot(
+                                page, target_dir, "after_download_popup"
+                            )
                             LOGGER.info("Screenshot saved: %s", shot3)
                             LOGGER.info("Downloaded file saved by fallback: %s", saved)
                             return saved
@@ -967,11 +1146,20 @@ def fill_and_download(
                 LOGGER.info("Screenshot saved: %s", shot3)
                 return fetched
 
-            html_dump = target_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_download_timeout_dump.html"
+            html_dump = (
+                target_dir
+                / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_download_timeout_dump.html"
+            )
             html_dump.write_text(page.content(), encoding="utf-8")
             shot = _save_screenshot(page, target_dir, "download_timeout")
-            LOGGER.error("Download did not start. Dump saved: %s ; screenshot: %s", html_dump, shot)
-            raise RuntimeError("Download did not start (possible validation errors or unresolved CAPTCHA).")
+            LOGGER.error(
+                "Download did not start. Dump saved: %s ; screenshot: %s",
+                html_dump,
+                shot,
+            )
+            raise RuntimeError(
+                "Download did not start (possible validation errors or unresolved CAPTCHA)."
+            )
         except Error:
             shot = _save_screenshot(page, target_dir, "playwright_error")
             LOGGER.exception("Playwright error. Screenshot: %s", shot)
@@ -992,7 +1180,9 @@ def fill_for_manual_handoff(
     wait_for_user_close: bool = True,
     save_dom_snapshot: bool = False,
 ) -> dict[str, str]:
-    target_dir = Path(download_dir or _safe_value(payload, "download", "dir") or "./downloads").resolve()
+    target_dir = Path(
+        download_dir or _safe_value(payload, "download", "dir") or "./downloads"
+    ).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
@@ -1008,7 +1198,9 @@ def fill_for_manual_handoff(
         try:
             LOGGER.info("Navigating to form (manual handoff mode): %s", form_url)
             page.goto(form_url, wait_until="domcontentloaded")
-            _ensure_form_loaded(page, timeout_ms, target_dir=target_dir, stage="manual_handoff_open")
+            _ensure_form_loaded(
+                page, timeout_ms, target_dir=target_dir, stage="manual_handoff_open"
+            )
 
             _fill_main_sections(page, payload, timeout_ms, select_tramite=False)
             shot = _save_screenshot(page, target_dir, "after_autofill_manual_handoff")
@@ -1022,7 +1214,9 @@ def fill_for_manual_handoff(
                 LOGGER.info("Manual handoff DOM snapshot saved: %s", dom_path)
             if wait_for_user_close:
                 print("Автозаполнение полей заявителя завершено.")
-                print("Дальше вручную: выберите Trámite, введите CAPTCHA и скачайте документ на странице.")
+                print(
+                    "Дальше вручную: выберите Trámite, введите CAPTCHA и скачайте документ на странице."
+                )
                 input("Нажмите Enter, чтобы закрыть браузер...")
             return {
                 "screenshot": str(shot),
@@ -1045,9 +1239,13 @@ def fill_for_manual_handoff_on_page(
     page.set_default_timeout(timeout_ms)
     # Do not attach dialog handlers here (see _attach_context_dialog_strategy).
 
-    _ensure_form_loaded(page, timeout_ms, target_dir=target_dir, stage="manual_handoff_existing_page")
+    _ensure_form_loaded(
+        page, timeout_ms, target_dir=target_dir, stage="manual_handoff_existing_page"
+    )
     _fill_main_sections(page, payload, timeout_ms, select_tramite=False)
-    shot = _save_screenshot(page, target_dir, "after_autofill_manual_handoff_existing_page")
+    shot = _save_screenshot(
+        page, target_dir, "after_autofill_manual_handoff_existing_page"
+    )
     LOGGER.info("Manual handoff (existing page) screenshot saved: %s", shot)
     dom_snapshot = ""
     if save_dom_snapshot:

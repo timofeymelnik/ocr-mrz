@@ -172,7 +172,11 @@ def postal_tipo_via_aliases() -> dict[str, str]:
     except Exception:
         return {}
 
-    source = raw.get("aliases") if isinstance(raw, dict) and isinstance(raw.get("aliases"), dict) else raw
+    source = (
+        raw.get("aliases")
+        if isinstance(raw, dict) and isinstance(raw.get("aliases"), dict)
+        else raw
+    )
     if not isinstance(source, dict):
         return {}
 

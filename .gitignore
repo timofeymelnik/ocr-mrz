@@ -39,5 +39,4 @@ ui/tsconfig.tsbuildinfo
 ui/.env.local
 ui/.env.*.local
 
-
 AGENTS.md

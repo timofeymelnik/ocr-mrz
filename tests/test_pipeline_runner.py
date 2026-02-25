@@ -11,7 +11,10 @@ def test_attach_pipeline_metadata_adds_handoff_and_crm() -> None:
     doc = {
         "schema_version": "1.2.0",
         "tasa_code": "visual_generic",
-        "card_extracted": {"full_name": ident["nombre_apellidos"], "nie_or_nif": ident["nif_nie"]},
+        "card_extracted": {
+            "full_name": ident["nombre_apellidos"],
+            "nie_or_nif": ident["nif_nie"],
+        },
         "forms": {
             "visual_generic": {
                 "fields": {
@@ -27,7 +30,11 @@ def test_attach_pipeline_metadata_adds_handoff_and_crm() -> None:
     out = attach_pipeline_metadata(
         document=doc,
         source_files=["sample.pdf"],
-        ocr_details={"front_text_len": 100, "back_text_len": 0, "used_cached_ocr": False},
+        ocr_details={
+            "front_text_len": 100,
+            "back_text_len": 0,
+            "used_cached_ocr": False,
+        },
         parse_stage={"name": "parse_extract_map", "status": "success"},
         crm_stage={"name": "crm_mapping", "status": "success"},
         ocr_stage={"name": "ocr", "status": "success"},

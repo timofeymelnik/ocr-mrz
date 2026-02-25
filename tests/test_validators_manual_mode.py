@@ -11,7 +11,9 @@ def _payload_without_tramite() -> dict:
 
 
 def test_tramite_not_required_in_manual_mode() -> None:
-    errors = collect_validation_errors(_payload_without_tramite(), require_tramite=False)
+    errors = collect_validation_errors(
+        _payload_without_tramite(), require_tramite=False
+    )
     assert all("tramite." not in err for err in errors)
 
 

@@ -60,7 +60,9 @@ class BrowserSessionLifecycleService:
             or record.get("form_url")
             or self._default_target_url
         )
-        resolved_target = resolved_target.strip() if isinstance(resolved_target, str) else ""
+        resolved_target = (
+            resolved_target.strip() if isinstance(resolved_target, str) else ""
+        )
         if not resolved_target:
             raise HTTPException(status_code=422, detail="Target URL is required.")
 
@@ -103,10 +105,14 @@ class BrowserSessionLifecycleService:
         record = self._read_or_bootstrap_record(document_id)
         session_id = self._safe_value(record.get("browser_session_id"))
         if not session_id:
-            raise HTTPException(status_code=404, detail="Browser session is not opened.")
+            raise HTTPException(
+                status_code=404, detail="Browser session is not opened."
+            )
 
         try:
-            state = await self._run_browser_call(self._get_browser_session_state, session_id)
+            state = await self._run_browser_call(
+                self._get_browser_session_state, session_id
+            )
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

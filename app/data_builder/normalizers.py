@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any
 
-from difflib import SequenceMatcher
-
 try:
-    from dateutil import parser as date_parser
+    from dateutil import parser as date_parser  # type: ignore[import-untyped]
 except Exception:  # pragma: no cover
-    date_parser = None  # type: ignore[assignment]
+    date_parser = None
 
 try:
     from rapidfuzz import fuzz
@@ -142,6 +142,8 @@ def to_spanish_date(value: str) -> str:
         parsed = date_parser.parse(normalized, dayfirst=True, yearfirst=False)
     except Exception:
         return ""
+    if not isinstance(parsed, datetime):
+        return ""
 
     return parsed.strftime("%d/%m/%Y")
 
@@ -234,8 +236,10 @@ def is_labelish_fragment(value: str) -> bool:
 
     if re.fullmatch(r"[*\-_/.: ]+", normalized):
         return True
-    if "/" in normalized and len(tokens) <= 5 and any(
-        token in label_tokens for token in tokens
+    if (
+        "/" in normalized
+        and len(tokens) <= 5
+        and any(token in label_tokens for token in tokens)
     ):
         return True
 

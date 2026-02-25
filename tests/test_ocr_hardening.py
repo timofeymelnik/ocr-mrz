@@ -13,6 +13,8 @@ def test_dedup_lines_and_merge_pages() -> None:
 
 
 def test_informative_pdf_text_detection() -> None:
-    assert VisionOCRClient._is_informative_pdf_text("TASA MODELO 790\nFORMA DE PAGO") is True
+    assert (
+        VisionOCRClient._is_informative_pdf_text("TASA MODELO 790\nFORMA DE PAGO")
+        is True
+    )
     assert VisionOCRClient._is_informative_pdf_text("short") is False
-

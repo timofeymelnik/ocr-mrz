@@ -38,4 +38,3 @@ def test_single_latest_template_replaces_previous(tmp_path: Path, monkeypatch) -
     assert len(files) == 1
     parsed = json.loads(files[0].read_text(encoding="utf-8"))
     assert parsed["mappings"][0]["selector"] == "#b"
-

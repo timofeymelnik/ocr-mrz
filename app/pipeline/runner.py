@@ -5,8 +5,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from app.crm.mapper import build_crm_profile
 from app.core.validators import normalize_payload_for_form
+from app.crm.mapper import build_crm_profile
 
 
 def _now_iso() -> str:
@@ -84,7 +84,11 @@ def attach_pipeline_metadata(
         "ui_contract": {
             "upload": {
                 "supported_extensions": [".jpg", ".jpeg", ".png", ".pdf"],
-                "expected_inputs": ["document_front", "document_back_optional", "overrides_optional"],
+                "expected_inputs": [
+                    "document_front",
+                    "document_back_optional",
+                    "overrides_optional",
+                ],
             },
             "manual_steps": ["verify_filled_fields", "submit_or_download_manually"],
             "autofill_scope": [
@@ -102,9 +106,15 @@ def stage_start() -> float:
     return time.time()
 
 
-def stage_success(name: str, started_at: float, details: dict[str, Any] | None = None) -> dict[str, Any]:
+def stage_success(
+    name: str, started_at: float, details: dict[str, Any] | None = None
+) -> dict[str, Any]:
     return _stage(name=name, status="success", started_at=started_at, details=details)
 
 
-def stage_failed(name: str, started_at: float, error: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    return _stage(name=name, status="failed", started_at=started_at, error=error, details=details)
+def stage_failed(
+    name: str, started_at: float, error: str, details: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return _stage(
+        name=name, status="failed", started_at=started_at, error=error, details=details
+    )

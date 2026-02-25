@@ -8,7 +8,19 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from fastapi import HTTPException, UploadFile
+from fastapi import UploadFile
+
+from app.api.errors import ApiError, ApiErrorCode
+from app.documents.source_kind import (
+    CANONICAL_SOURCE_KINDS,
+    detect_source_kind,
+    normalize_source_kind,
+)
+from app.documents.workflow import (
+    WORKFLOW_CLIENT_MATCH,
+    WORKFLOW_REVIEW,
+    stage_to_next_step,
+)
 
 
 class OCRClientProtocol(Protocol):
@@ -39,7 +51,9 @@ class CRMRepositoryProtocol(Protocol):
     ) -> dict[str, Any]:
         """Create or update CRM record after upload."""
 
-    def update_document_fields(self, document_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    def update_document_fields(
+        self, document_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
         """Patch selected CRM fields."""
 
 
@@ -56,16 +70,22 @@ class UploadService:
         runtime_url: Callable[[Path], str],
         allowed_suffix: Callable[[str], bool],
         write_record: Callable[[str, dict[str, Any]], None],
-        merge_candidates_for_payload: Callable[[str, dict[str, Any], int], list[dict[str, Any]]],
+        merge_candidates_for_payload: Callable[
+            [str, dict[str, Any], int], list[dict[str, Any]]
+        ],
         collect_validation_errors: Callable[[dict[str, Any], bool], list[str]],
-        collect_validation_issues: Callable[[dict[str, Any], bool], list[dict[str, Any]]],
+        collect_validation_issues: Callable[
+            [dict[str, Any], bool], list[dict[str, Any]]
+        ],
         build_tasa_document: Callable[..., dict[str, Any]],
         normalize_payload_for_form: Callable[[dict[str, Any]], dict[str, Any]],
         attach_pipeline_metadata: Callable[..., dict[str, Any]],
         stage_start: Callable[[], float],
         stage_success: Callable[..., dict[str, Any]],
         create_ocr_client: Callable[[], OCRClientProtocol],
-        sync_family_reference: Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]],
+        sync_family_reference: Callable[
+            [str, dict[str, Any], dict[str, Any]], dict[str, Any]
+        ],
     ) -> None:
         """Initialize upload service with explicit collaborators."""
         self._uploads_dir = uploads_dir
@@ -95,25 +115,20 @@ class UploadService:
     ) -> dict[str, Any]:
         """Handle uploaded file, OCR extraction and CRM persistence."""
         if not file.filename or not self._allowed_suffix(file.filename):
-            raise HTTPException(
+            raise ApiError(
                 status_code=400,
-                detail="Only .jpg/.jpeg/.png/.pdf are supported.",
+                error_code=ApiErrorCode.VALIDATION_ERROR,
+                message="Only .jpg/.jpeg/.png/.pdf are supported.",
             )
 
-        normalized_source_kind = self._safe_value(source_kind).lower()
-        if normalized_source_kind not in {
-            "anketa",
-            "fmiliar",
-            "familiar",
-            "passport",
-            "nie_tie",
-            "visa",
-        }:
-            raise HTTPException(
+        input_source_kind = normalize_source_kind(self._safe_value(source_kind))
+        if self._safe_value(source_kind) and not input_source_kind:
+            raise ApiError(
                 status_code=422,
-                detail=(
-                    "source_kind is required and must be one of: "
-                    "anketa, fmiliar, passport, nie_tie, visa"
+                error_code=ApiErrorCode.VALIDATION_ERROR,
+                message=(
+                    "source_kind must be one of: "
+                    "anketa, fmiliar/familiar, passport, nie_tie, visa"
                 ),
             )
 
@@ -126,12 +141,25 @@ class UploadService:
             shutil.copyfileobj(file.file, fh)
 
         ocr_client = self._create_ocr_client()
-        google_maps_api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip() or os.getenv(
-            "GOOGLE_CLOUD_VISION_API_KEY", ""
-        ).strip()
+        google_maps_api_key = (
+            os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+            or os.getenv("GOOGLE_CLOUD_VISION_API_KEY", "").strip()
+        )
 
         ocr_started = self._stage_start()
         ocr_result = ocr_client.extract_text(upload_path)
+        detection = detect_source_kind(
+            text=self._safe_value(getattr(ocr_result, "full_text", "")),
+            filename=file.filename,
+        )
+        normalized_source_kind = input_source_kind or detection.source_kind
+        if normalized_source_kind not in CANONICAL_SOURCE_KINDS:
+            normalized_source_kind = "anketa"
+        source_kind_auto = not bool(input_source_kind)
+        source_kind_confidence = detection.confidence if source_kind_auto else 1.0
+        source_kind_requires_review = (
+            detection.requires_review if source_kind_auto else False
+        )
         ocr_stage = self._stage_success(
             "ocr",
             ocr_started,
@@ -140,6 +168,9 @@ class UploadService:
                 or "live",
                 "used_cached_ocr": False,
                 "pages": len(ocr_result.pages),
+                "source_kind_detected": normalized_source_kind,
+                "source_kind_confidence": source_kind_confidence,
+                "source_kind_auto": source_kind_auto,
             },
         )
 
@@ -177,10 +208,16 @@ class UploadService:
 
         payload = self._normalize_payload_for_form(document)
         merge_candidates = self._merge_candidates_for_payload(document_id, payload, 10)
+        client_match = self._select_client_match_candidate(merge_candidates)
+        identity_match_found = bool(client_match)
+        identity_source_document_id = self._safe_value(client_match.get("document_id"))
+        workflow_stage = (
+            WORKFLOW_CLIENT_MATCH if identity_match_found else WORKFLOW_REVIEW
+        )
         missing_fields = self._collect_validation_errors(payload, False)
         validation_issues = self._collect_validation_issues(payload, False)
 
-        record = {
+        record: dict[str, Any] = {
             "document_id": document_id,
             "tasa_code": tasa_code,
             "source": {
@@ -188,6 +225,11 @@ class UploadService:
                 "stored_path": str(upload_path),
                 "preview_url": self._runtime_url(upload_path),
                 "source_kind": normalized_source_kind,
+                "source_kind_input": input_source_kind,
+                "source_kind_detected": normalized_source_kind,
+                "source_kind_confidence": source_kind_confidence,
+                "source_kind_auto": source_kind_auto,
+                "source_kind_requires_review": source_kind_requires_review,
             },
             "document": document,
             "payload": payload,
@@ -199,8 +241,11 @@ class UploadService:
             ],
             "form_url": self._default_target_url,
             "target_url": self._default_target_url,
-            "identity_match_found": False,
-            "identity_source_document_id": "",
+            "identity_match_found": identity_match_found,
+            "identity_source_document_id": identity_source_document_id,
+            "client_match": client_match,
+            "client_match_decision": "pending" if identity_match_found else "none",
+            "workflow_stage": workflow_stage,
             "enrichment_preview": [],
             "merge_candidates": merge_candidates,
             "family_links": [],
@@ -208,24 +253,47 @@ class UploadService:
         }
 
         self._write_record(document_id, record)
+        source_payload = (
+            record["source"] if isinstance(record.get("source"), dict) else {}
+        )
+        manual_steps_required = (
+            record["manual_steps_required"]
+            if isinstance(record.get("manual_steps_required"), list)
+            else []
+        )
+        enrichment_preview = (
+            record["enrichment_preview"]
+            if isinstance(record.get("enrichment_preview"), list)
+            else []
+        )
         self._crm_repo.upsert_from_upload(
             document_id=document_id,
             payload=payload,
             ocr_document=document,
-            source=record["source"],
+            source=source_payload,
             missing_fields=missing_fields,
-            manual_steps_required=record["manual_steps_required"],
+            manual_steps_required=manual_steps_required,
             form_url=self._default_target_url,
             target_url=self._default_target_url,
             identity_match_found=bool(record.get("identity_match_found")),
             identity_source_document_id=self._safe_value(
                 record.get("identity_source_document_id")
             ),
-            enrichment_preview=list(record.get("enrichment_preview") or []),
+            enrichment_preview=list(enrichment_preview),
             merge_candidates=merge_candidates,
         )
+        self._crm_repo.update_document_fields(
+            document_id,
+            {
+                "workflow_stage": workflow_stage,
+                "client_match": client_match,
+                "client_match_decision": (
+                    "pending" if identity_match_found else "none"
+                ),
+            },
+        )
 
-        family_sync = self._sync_family_reference(document_id, payload, record["source"])
+        family_sync = self._sync_family_reference(document_id, payload, source_payload)
         if family_sync.get("linked"):
             record["family_links"] = family_sync.get("family_links") or []
             record["family_reference"] = family_sync.get("family_reference") or {}
@@ -240,20 +308,48 @@ class UploadService:
 
         return {
             "document_id": document_id,
-            "preview_url": record["source"]["preview_url"],
+            "preview_url": str(source_payload.get("preview_url") or ""),
             "form_url": self._default_target_url,
             "target_url": self._default_target_url,
             "payload": payload,
             "document": document,
             "missing_fields": missing_fields,
             "validation_issues": validation_issues,
-            "manual_steps_required": record["manual_steps_required"],
+            "manual_steps_required": manual_steps_required,
             "identity_match_found": bool(record.get("identity_match_found")),
             "identity_source_document_id": self._safe_value(
                 record.get("identity_source_document_id")
             ),
-            "enrichment_preview": list(record.get("enrichment_preview") or []),
+            "workflow_stage": workflow_stage,
+            "workflow_next_step": stage_to_next_step(workflow_stage),
+            "source_kind_input": input_source_kind,
+            "source_kind_detected": normalized_source_kind,
+            "source_kind_confidence": source_kind_confidence,
+            "source_kind_auto": source_kind_auto,
+            "source_kind_requires_review": source_kind_requires_review,
+            "client_match": client_match,
+            "client_match_decision": record.get("client_match_decision") or "none",
+            "enrichment_preview": list(enrichment_preview),
             "merge_candidates": merge_candidates,
             "family_links": record.get("family_links") or [],
             "family_reference": record.get("family_reference") or {},
         }
+
+    @staticmethod
+    def _select_client_match_candidate(
+        merge_candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Select strongest client match candidate from merge suggestions."""
+        if not merge_candidates:
+            return {}
+        by_identity = [
+            row
+            for row in merge_candidates
+            if "document_match" in (row.get("reasons") or [])
+        ]
+        if by_identity:
+            return dict(by_identity[0])
+        top = merge_candidates[0]
+        if int(top.get("score") or 0) >= 100:
+            return dict(top)
+        return {}

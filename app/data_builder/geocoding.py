@@ -31,9 +31,14 @@ def fetch_geocode_candidates(
         response.raise_for_status()
         payload = response.json()
         if payload.get("status") not in {"OK", "ZERO_RESULTS"}:
-            LOGGER.warning("Google Geocoding status=%s error=%s", payload.get("status"), payload.get("error_message"))
+            LOGGER.warning(
+                "Google Geocoding status=%s error=%s",
+                payload.get("status"),
+                payload.get("error_message"),
+            )
             return []
-        return payload.get("results", [])
+        results = payload.get("results", [])
+        return results if isinstance(results, list) else []
     except Exception:
         LOGGER.exception("Failed requesting Google Geocoding API.")
         return []

@@ -18,7 +18,6 @@ from app.browser.session_manager import (
     close_browser_session,
     fill_browser_session,
     get_browser_session_state,
-    inspect_browser_session_fields,
     open_browser_session,
 )
 
@@ -32,7 +31,9 @@ AUTOFILL_DIR = RUNTIME_DIR / "autofill_client_agent"
 for directory in [RUNTIME_DIR, AUTOFILL_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-_BROWSER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="client-playwright-sync")
+_BROWSER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="client-playwright-sync"
+)
 
 
 class BrowserSessionOpenRequest(BaseModel):
@@ -48,11 +49,6 @@ class BrowserSessionFillRequest(BaseModel):
     explicit_mappings: Optional[list[dict[str, Any]]] = None
     fill_strategy: str = "strict_template"
     document_id: Optional[str] = None
-
-
-class BrowserSessionInspectRequest(BaseModel):
-    payload: dict[str, Any]
-    mapping_hints: Optional[dict[str, str]] = None
 
 
 def _safe(value: Any) -> str:
@@ -89,7 +85,9 @@ def create_app() -> FastAPI:
     app = FastAPI(title="OCR MRZ Client Browser Agent", version="1.0.0")
     allowed_origins_env = os.getenv("CLIENT_AGENT_ALLOWED_ORIGINS", "").strip()
     allowed_origins = [v.strip() for v in allowed_origins_env.split(",") if v.strip()]
-    allowed_origin_regex = os.getenv("CLIENT_AGENT_ALLOWED_ORIGIN_REGEX", "").strip() or None
+    allowed_origin_regex = (
+        os.getenv("CLIENT_AGENT_ALLOWED_ORIGIN_REGEX", "").strip() or None
+    )
     if not allowed_origins:
         allowed_origins = ["*"]
     app.add_middleware(
@@ -120,7 +118,9 @@ def create_app() -> FastAPI:
                 timeout_ms=req.timeout_ms,
             )
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc) or "Failed to open browser session.") from exc
+            raise HTTPException(
+                status_code=422, detail=str(exc) or "Failed to open browser session."
+            ) from exc
 
     @app.get("/api/browser-session/{session_id}/state")
     async def session_state(session_id: str) -> dict[str, Any]:
@@ -129,20 +129,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/api/browser-session/{session_id}/fields/inspect")
-    async def inspect_fields(session_id: str, req: BrowserSessionInspectRequest) -> dict[str, Any]:
-        try:
-            return await _run_browser_call(
-                inspect_browser_session_fields,
-                session_id,
-                req.payload,
-                mapping_hints=req.mapping_hints,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc) or "Failed to inspect session fields.") from exc
-
     @app.post("/api/browser-session/{session_id}/fill")
-    async def fill_session(session_id: str, req: BrowserSessionFillRequest) -> dict[str, Any]:
+    async def fill_session(
+        session_id: str, req: BrowserSessionFillRequest
+    ) -> dict[str, Any]:
         out_key = _safe(req.document_id) or session_id
         out_dir = AUTOFILL_DIR / out_key
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -157,7 +147,9 @@ def create_app() -> FastAPI:
                 fill_strategy=req.fill_strategy,
             )
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc) or "Failed to fill browser session.") from exc
+            raise HTTPException(
+                status_code=422, detail=str(exc) or "Failed to fill browser session."
+            ) from exc
 
         return {
             "session_id": result.get("session_id") or session_id,

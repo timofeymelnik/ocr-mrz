@@ -11,11 +11,9 @@ from urllib.parse import urlparse
 LOGGER = logging.getLogger(__name__)
 
 try:
-    from pymongo import MongoClient
-    from pymongo.collection import Collection
+    import pymongo
 except Exception:  # pragma: no cover
-    MongoClient = None  # type: ignore[assignment]
-    Collection = Any  # type: ignore[assignment]
+    pymongo = None  # type: ignore[assignment]
 
 
 def _now_iso() -> str:
@@ -55,26 +53,39 @@ class FormMappingRepository:
         self._fallback_dir.mkdir(parents=True, exist_ok=True)
 
         self._mongo_enabled = False
-        self._collection: Collection | None = None
+        self._collection: Any | None = None
 
         mongo_uri = os.getenv("MONGODB_URI", "").strip()
         mongo_db = os.getenv("MONGODB_DB", "ocr_mrz").strip() or "ocr_mrz"
-        mongo_collection = os.getenv("MONGODB_MAPPING_COLLECTION", "form_mappings").strip() or "form_mappings"
-        if mongo_uri and MongoClient is not None:
+        mongo_collection = (
+            os.getenv("MONGODB_MAPPING_COLLECTION", "form_mappings").strip()
+            or "form_mappings"
+        )
+        if mongo_uri and pymongo is not None:
             try:
-                client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+                client: Any = pymongo.MongoClient(
+                    mongo_uri, serverSelectionTimeoutMS=3000
+                )
                 client.admin.command("ping")
                 self._collection = client[mongo_db][mongo_collection]
                 self._collection.create_index([("host", 1), ("path", 1)], unique=True)
                 self._collection.create_index([("updated_at", -1)])
                 self._mongo_enabled = True
-                LOGGER.info("FormMappingRepository using MongoDB: db=%s collection=%s", mongo_db, mongo_collection)
+                LOGGER.info(
+                    "FormMappingRepository using MongoDB: db=%s collection=%s",
+                    mongo_db,
+                    mongo_collection,
+                )
             except Exception:
-                LOGGER.exception("MongoDB form mapping connection failed. Falling back to local store.")
+                LOGGER.exception(
+                    "MongoDB form mapping connection failed. Falling back to local store."
+                )
                 self._mongo_enabled = False
                 self._collection = None
         else:
-            LOGGER.warning("MONGODB_URI missing or pymongo unavailable. Using local form mapping store fallback.")
+            LOGGER.warning(
+                "MONGODB_URI missing or pymongo unavailable. Using local form mapping store fallback."
+            )
 
     def _fallback_file(self, host: str, path: str) -> Path:
         return self._fallback_dir / f"{_target_key(host, path)}.json"
@@ -92,7 +103,9 @@ class FormMappingRepository:
                 continue
             if field_kind not in {"text", "select", "checkbox", "radio"}:
                 field_kind = "text"
-            if field_kind in {"checkbox", "radio"} and not (match_value and checked_when):
+            if field_kind in {"checkbox", "radio"} and not (
+                match_value and checked_when
+            ):
                 # Rule-based controls must define both properties.
                 continue
             if field_kind in {"text", "select"} and not canonical_key:
@@ -111,7 +124,9 @@ class FormMappingRepository:
         return normalized
 
     @staticmethod
-    def _sanitize_known_target_mappings(host: str, path: str, mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _sanitize_known_target_mappings(
+        host: str, path: str, mappings: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         h = (host or "").strip().lower()
         p = (path or "").strip().lower().rstrip("/") or "/"
         if not (h == "sede.policia.gob.es" and p == "/tasa790_012"):
@@ -121,9 +136,9 @@ class FormMappingRepository:
             row = dict(item)
             selector = str(row.get("selector") or "").lower()
             key = str(row.get("canonical_key") or "")
-            if "input[name*=\"piso\" i]" in selector and key == "piso_puerta":
+            if 'input[name*="piso" i]' in selector and key == "piso_puerta":
                 row["canonical_key"] = "piso"
-            if "input[name*=\"nombre\" i]" in selector and key == "nombre":
+            if 'input[name*="nombre" i]' in selector and key == "nombre":
                 row["canonical_key"] = "nombre_apellidos"
             out.append(row)
         return out
@@ -137,7 +152,9 @@ class FormMappingRepository:
             if not doc:
                 return None
             out = dict(doc)
-            out["mappings"] = self._sanitize_known_target_mappings(host, path, list(out.get("mappings") or []))
+            out["mappings"] = self._sanitize_known_target_mappings(
+                host, path, list(out.get("mappings") or [])
+            )
             out["mappings_count"] = len(out["mappings"])
             return out
 
@@ -146,14 +163,18 @@ class FormMappingRepository:
             return None
         try:
             out = json.loads(file_path.read_text(encoding="utf-8"))
-            out["mappings"] = self._sanitize_known_target_mappings(host, path, list(out.get("mappings") or []))
+            out["mappings"] = self._sanitize_known_target_mappings(
+                host, path, list(out.get("mappings") or [])
+            )
             out["mappings_count"] = len(out["mappings"])
             return out
         except Exception:
             LOGGER.exception("Failed reading local mapping template: %s", file_path)
             return None
 
-    def get_template_for_revision(self, *, target_url: str, revision: str) -> dict[str, Any] | None:
+    def get_template_for_revision(
+        self, *, target_url: str, revision: str
+    ) -> dict[str, Any] | None:
         # Revisions are removed. Keep method for compatibility with callers.
         _ = revision
         return self.get_latest_for_url(target_url)
@@ -174,7 +195,9 @@ class FormMappingRepository:
         _ = template_pdf_bytes
         now = _now_iso()
         normalized_mappings = self._normalize_mappings(mappings)
-        normalized_mappings = self._sanitize_known_target_mappings(host, path, normalized_mappings)
+        normalized_mappings = self._sanitize_known_target_mappings(
+            host, path, normalized_mappings
+        )
         template = {
             "host": host,
             "path": path,
@@ -188,9 +211,13 @@ class FormMappingRepository:
         }
 
         if self._mongo_enabled and self._collection is not None:
-            existing = self._collection.find_one({"host": host, "path": path}, {"_id": 0})
+            existing = self._collection.find_one(
+                {"host": host, "path": path}, {"_id": 0}
+            )
             template["created_at"] = str((existing or {}).get("created_at") or now)
-            self._collection.update_one({"host": host, "path": path}, {"$set": template}, upsert=True)
+            self._collection.update_one(
+                {"host": host, "path": path}, {"$set": template}, upsert=True
+            )
             return template
 
         file_path = self._fallback_file(host, path)
@@ -202,5 +229,7 @@ class FormMappingRepository:
                 template["created_at"] = now
         else:
             template["created_at"] = now
-        file_path.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
+        file_path.write_text(
+            json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return template

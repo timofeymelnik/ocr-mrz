@@ -7,3 +7,4 @@ pre-commit==4.1.0
 pytest-cov==6.0.0
 hypothesis==6.127.8
 types-requests==2.32.0.20250328
+httpx==0.28.1

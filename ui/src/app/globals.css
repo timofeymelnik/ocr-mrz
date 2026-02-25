@@ -3,34 +3,34 @@
 @tailwind utilities;
 
 :root {
-  --background: 222 29% 98%;
+  --background: 42 24% 95%;
   --foreground: 222 29% 12%;
   --card: 0 0% 100%;
   --card-foreground: 222 29% 12%;
-  --primary: 210 85% 38%;
+  --primary: 217 100% 55%;
   --primary-foreground: 210 40% 98%;
-  --muted: 215 16% 92%;
+  --muted: 42 16% 90%;
   --muted-foreground: 222 11% 35%;
-  --border: 215 20% 84%;
-  --input: 215 20% 84%;
-  --ring: 210 85% 38%;
+  --border: 222 18% 82%;
+  --input: 222 18% 82%;
+  --ring: 217 100% 55%;
   --radius: 0.75rem;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: 222 24% 10%;
-    --foreground: 210 40% 96%;
-    --card: 222 22% 14%;
-    --card-foreground: 210 40% 96%;
-    --primary: 208 86% 56%;
-    --primary-foreground: 222 24% 10%;
-    --muted: 222 18% 20%;
-    --muted-foreground: 214 15% 70%;
-    --border: 222 16% 28%;
-    --input: 222 16% 28%;
-    --ring: 208 86% 56%;
+    --background: 220 18% 10%;
+    --foreground: 210 24% 96%;
+    --card: 220 18% 14%;
+    --card-foreground: 210 24% 96%;
+    --primary: 217 100% 60%;
+    --primary-foreground: 220 20% 10%;
+    --muted: 220 12% 20%;
+    --muted-foreground: 215 12% 72%;
+    --border: 220 10% 28%;
+    --input: 220 10% 28%;
+    --ring: 217 100% 60%;
     color-scheme: dark;
   }
 }
@@ -41,4 +41,54 @@
 
 body {
   @apply bg-background text-foreground;
+  font-family: var(--font-dm-sans), sans-serif;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5 {
+  font-family: var(--font-syne), sans-serif;
+}
+
+.ocr-scan-card {
+  position: relative;
+  height: 160px;
+  width: 112px;
+  border-radius: 10px;
+  border: 1px solid hsl(var(--border));
+  background:
+    linear-gradient(to bottom, transparent 0%, hsl(var(--muted) / 0.5) 100%),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 14px,
+      hsl(var(--border) / 0.4) 15px
+    );
+  overflow: hidden;
+}
+
+.ocr-scan-line {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    hsl(var(--primary)) 50%,
+    transparent 100%
+  );
+  box-shadow: 0 0 8px hsl(var(--primary) / 0.45);
+  animation: ocr-scan-move 1.8s ease-in-out infinite alternate;
+}
+
+@keyframes ocr-scan-move {
+  from {
+    top: 8px;
+  }
+  to {
+    top: calc(100% - 10px);
+  }
 }

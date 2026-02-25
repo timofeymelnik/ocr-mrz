@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from app.core.validators import normalize_date, normalize_mrz_date, validate_spanish_document_number
+from app.core.validators import (
+    normalize_date,
+    normalize_mrz_date,
+    validate_spanish_document_number,
+)
 
 
 @dataclass
@@ -185,7 +189,9 @@ def _find_names(lines: List[str]) -> tuple[str, str]:
         joined,
     )
     if combined_match:
-        return _clean_field(combined_match.group(1)), _clean_field(combined_match.group(2))
+        return _clean_field(combined_match.group(1)), _clean_field(
+            combined_match.group(2)
+        )
 
     surname = _extract_after_label(lines, ["APELLIDOS", "SURNAME"])
     name = _extract_after_label(lines, ["NOMBRE", "NAME", "GIVEN NAMES"])
@@ -196,7 +202,9 @@ def _find_names(lines: List[str]) -> tuple[str, str]:
         return _clean_field(surname), _clean_field(name)
 
     for line in lines:
-        if ("SURNAME" in line or "APELLIDOS" in line) and ("FORENAME" in line or "NOMBRE" in line):
+        if ("SURNAME" in line or "APELLIDOS" in line) and (
+            "FORENAME" in line or "NOMBRE" in line
+        ):
             words = re.findall(r"[A-Z][A-Z<\-']+", line)
             filtered = [
                 w
@@ -239,7 +247,9 @@ def _find_dates(text: str) -> tuple[str, str]:
         return dob, expiry
 
     date_candidates: list[datetime] = []
-    for raw in re.findall(r"\b\d{2}[/-]\d{2}[/-]\d{4}\b|\b\d{8}\b|\b\d{2}\s+\d{2}\s+\d{4}\b", text):
+    for raw in re.findall(
+        r"\b\d{2}[/-]\d{2}[/-]\d{4}\b|\b\d{8}\b|\b\d{2}\s+\d{2}\s+\d{4}\b", text
+    ):
         normalized = normalize_date(re.sub(r"[^0-9]", "", raw))
         if not normalized:
             continue

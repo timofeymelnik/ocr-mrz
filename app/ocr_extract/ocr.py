@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 import os
 from dataclasses import dataclass
@@ -63,7 +62,12 @@ class VisionOCRClient:
                 full_text = scan_full
                 source = "pdf_ocr_scan"
             mrz_candidates = self._find_mrz_candidates(full_text)
-            return OCRResult(full_text=full_text, pages=pages, mrz_candidates=mrz_candidates, ocr_source=source)
+            return OCRResult(
+                full_text=full_text,
+                pages=pages,
+                mrz_candidates=mrz_candidates,
+                ocr_source=source,
+            )
         elif suffix in {".jpg", ".jpeg", ".png"}:
             pages = [self._extract_image_text(path.read_bytes())]
             source = "image_ocr"
@@ -72,7 +76,12 @@ class VisionOCRClient:
 
         full_text = self._sanitize_text(self._merge_pages_dedup(pages))
         mrz_candidates = self._find_mrz_candidates(full_text)
-        return OCRResult(full_text=full_text, pages=pages, mrz_candidates=mrz_candidates, ocr_source=source)
+        return OCRResult(
+            full_text=full_text,
+            pages=pages,
+            mrz_candidates=mrz_candidates,
+            ocr_source=source,
+        )
 
     def _extract_pdf_text(self, path: Path) -> List[str]:
         LOGGER.info("Running OCR for PDF: %s", path.name)
@@ -99,7 +108,11 @@ class VisionOCRClient:
                 widgets = page.widgets() or []
                 for w in widgets:
                     field_name = (w.field_name or "").strip()
-                    field_value = (w.field_value or "").strip() if hasattr(w, "field_value") else ""
+                    field_value = (
+                        (w.field_value or "").strip()
+                        if hasattr(w, "field_value")
+                        else ""
+                    )
                     if field_name or field_value:
                         widgets_text.append(f"{field_name}: {field_value}".strip(": "))
                 merged_page_text = "\n".join(
@@ -122,13 +135,19 @@ class VisionOCRClient:
         response = self.client.document_text_detection(image=image)
         if response.error.message:
             raise RuntimeError(f"Vision API error: {response.error.message}")
-        text = response.full_text_annotation.text if response.full_text_annotation else ""
+        text = (
+            response.full_text_annotation.text if response.full_text_annotation else ""
+        )
         return self._sanitize_text(text)
 
     @staticmethod
     def _sanitize_text(text: str) -> str:
         # Drops invalid surrogate code points that break JSON/UTF-8 writes.
-        return (text or "").encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        return (
+            (text or "")
+            .encode("utf-8", errors="replace")
+            .decode("utf-8", errors="replace")
+        )
 
     @staticmethod
     def _looks_like_form_pdf(text: str) -> bool:

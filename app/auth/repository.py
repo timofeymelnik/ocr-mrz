@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app.auth.models import AuthUser, RefreshTokenRecord
 
 try:
-    from pymongo import MongoClient
+    import pymongo
 except Exception:  # pragma: no cover
-    MongoClient = None  # type: ignore[assignment]
+    pymongo = None  # type: ignore[assignment]
 
 
 class AuthRepository:
@@ -31,15 +32,22 @@ class AuthRepository:
         mongo_uri = os.getenv("MONGODB_URI", "").strip()
         mongo_db = os.getenv("MONGODB_DB", "ocr_mrz").strip() or "ocr_mrz"
 
-        if mongo_uri and MongoClient is not None:
+        if mongo_uri and pymongo is not None:
             try:
-                client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+                client: Any = pymongo.MongoClient(
+                    mongo_uri, serverSelectionTimeoutMS=3000
+                )
                 client.admin.command("ping")
                 db = client[mongo_db]
                 self._mongo_users = db["auth_users"]
                 self._mongo_refresh = db["auth_refresh_tokens"]
                 self._mongo_users.create_index("email", unique=True)
                 self._mongo_refresh.create_index("jti", unique=True)
+                self._mongo_refresh.create_index(
+                    "expires_at_dt",
+                    expireAfterSeconds=0,
+                    name="idx_auth_refresh_tokens_expires_at_ttl",
+                )
             except Exception:
                 self._mongo_users = None
                 self._mongo_refresh = None
@@ -56,7 +64,9 @@ class AuthRepository:
 
     def _write_json_file(self, path: Path, items: list[dict[str, Any]]) -> None:
         """Persist list payload to JSON file."""
-        path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     def get_user_by_email(self, email: str) -> AuthUser | None:
         """Get user by email from storage."""
@@ -74,11 +84,17 @@ class AuthRepository:
         """Create or update auth user."""
         doc = user.model_dump()
         if self._mongo_users is not None:
-            self._mongo_users.update_one({"email": user.email}, {"$set": doc}, upsert=True)
+            self._mongo_users.update_one(
+                {"email": user.email}, {"$set": doc}, upsert=True
+            )
             return
 
         items = self._read_json_file(self._users_file)
-        next_items = [row for row in items if str(row.get("email", "")).strip().lower() != user.email.lower()]
+        next_items = [
+            row
+            for row in items
+            if str(row.get("email", "")).strip().lower() != user.email.lower()
+        ]
         next_items.append(doc)
         self._write_json_file(self._users_file, next_items)
 
@@ -86,7 +102,12 @@ class AuthRepository:
         """Save refresh token record for rotation/revocation."""
         doc = record.model_dump()
         if self._mongo_refresh is not None:
-            self._mongo_refresh.update_one({"jti": record.jti}, {"$set": doc}, upsert=True)
+            doc["expires_at_dt"] = datetime.fromtimestamp(
+                record.expires_at, tz=timezone.utc
+            )
+            self._mongo_refresh.update_one(
+                {"jti": record.jti}, {"$set": doc}, upsert=True
+            )
             return
 
         items = self._read_json_file(self._refresh_file)

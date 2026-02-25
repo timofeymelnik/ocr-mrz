@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from app.core.validators import normalize_date, validate_spanish_document_number
+from app.data_builder import constants as _constants
 from app.data_builder.address_parser import (
     expand_abbrev as _address_expand_abbrev,
     parse_address_parts as _address_parse_address_parts,
@@ -18,7 +18,6 @@ from app.data_builder.constants import (
     REQUIRED_FIELDS_790_012,
     REQUIRED_FIELDS_MI_T,
     REQUIRED_FIELDS_VISUAL_GENERIC,
-    postal_tipo_via_aliases as _postal_tipo_via_aliases,
 )
 from app.data_builder.geocoding import fetch_geocode_candidates
 from app.data_builder.mrz_parser import parse_mrz_lines
@@ -38,6 +37,8 @@ from app.data_builder.normalizers import (
     transliterate_ru as _transliterate_ru,
     upper_compact as _upper_compact,
 )
+
+_postal_tipo_via_aliases = _constants.postal_tipo_via_aliases
 
 
 def _now_iso() -> str:
@@ -74,9 +75,13 @@ def _extract_labeled_value(lines: list[str], labels: list[str]) -> str:
 
 
 def _extract_passport_candidate(lines: list[str], text: str) -> str:
-    marker_re = re.compile(r"PASAPORTE|PASSPORT|N[ºO°]?\s*DOCUMENTO|DOCUMENT NUMBER|OTRO DOCUMENTO", re.I)
+    marker_re = re.compile(
+        r"PASAPORTE|PASSPORT|N[ºO°]?\s*DOCUMENTO|DOCUMENT NUMBER|OTRO DOCUMENTO", re.I
+    )
     number_re = re.compile(r"\b(?:[A-Z]{0,2}\s*\d{6,9}|\d{2}\s+\d{7})\b")
-    stop_re = re.compile(r"VISADO|VISA|DATOS DEL VIAJE|PAIS PROCEDENCIA|N[°ºO] VUELO|HORA", re.I)
+    stop_re = re.compile(
+        r"VISADO|VISA|DATOS DEL VIAJE|PAIS PROCEDENCIA|N[°ºO] VUELO|HORA", re.I
+    )
 
     for i, line in enumerate(lines):
         if not marker_re.search(line):
@@ -127,7 +132,10 @@ def _looks_like_name_noise(value: str) -> bool:
     v = _clean_spaces(value).upper()
     if not v:
         return True
-    if any(tok in v for tok in ["SURNAME", "SURNAMES", "NAME", "NOMBRE", "APELLIDO", "APELLIDOS"]):
+    if any(
+        tok in v
+        for tok in ["SURNAME", "SURNAMES", "NAME", "NOMBRE", "APELLIDO", "APELLIDOS"]
+    ):
         if len(re.findall(r"[A-ZÁÉÍÓÚÑÜ]{2,}", v)) <= 2:
             return True
     if "/" in v and len(v) < 40:
@@ -142,25 +150,39 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
 
     nif_nie = docs[0] if docs else ""
     if not nif_nie:
-        raw = _extract_labeled_value(lines, ["NIE", "NIF", "NIF/NIE", "N\\.?I\\.?F\\.?/N\\.?I\\.?E\\.?", "DOCUMENTO"])
+        raw = _extract_labeled_value(
+            lines,
+            ["NIE", "NIF", "NIF/NIE", "N\\.?I\\.?F\\.?/N\\.?I\\.?E\\.?", "DOCUMENTO"],
+        )
         m = re.search(r"(?:[XYZ]\d{7}[A-Z]|\d{8}[A-Z])", _upper_compact(raw))
         if m:
             nif_nie = m.group(0)
 
-    apellidos = _extract_labeled_value(lines, ["APELLIDOS?", "APELLIDO", "SURNAMES?", "SURNAME"])
+    apellidos = _extract_labeled_value(
+        lines, ["APELLIDOS?", "APELLIDO", "SURNAMES?", "SURNAME"]
+    )
     nombre = _extract_labeled_value(lines, ["NOMBRE", "NOMBRES?", "NAME", "FORENAMES?"])
     full_name = _extract_labeled_value(
-        lines, ["APELLIDOS?\\s+Y\\s+NOMBRE", "NOMBRE\\s+Y\\s+APELLIDOS?", "RAZ[ÓO]N\\s+SOCIAL"]
+        lines,
+        [
+            "APELLIDOS?\\s+Y\\s+NOMBRE",
+            "NOMBRE\\s+Y\\s+APELLIDOS?",
+            "RAZ[ÓO]N\\s+SOCIAL",
+        ],
     )
     if not full_name:
         full_name = _clean_spaces(f"{apellidos} {nombre}".strip())
 
-    dob_raw = _extract_labeled_value(lines, ["FECHA\\s+NAC", "FECHA\\s+DE\\s+NACIMIENTO", "BIRTH\\s+DATE", "DOB"])
+    dob_raw = _extract_labeled_value(
+        lines, ["FECHA\\s+NAC", "FECHA\\s+DE\\s+NACIMIENTO", "BIRTH\\s+DATE", "DOB"]
+    )
     dob = _to_spanish_date(dob_raw)
     if not dob:
         dob_guess, _ = _extract_birth_nationality(text)
         dob = _to_spanish_date(dob_guess)
-    nat = _normalize_nationality(_extract_labeled_value(lines, ["NACIONALIDAD", "NATIONALITY"]))
+    nat = _normalize_nationality(
+        _extract_labeled_value(lines, ["NACIONALIDAD", "NATIONALITY"])
+    )
     if not nat:
         _, nat_guess = _extract_birth_nationality(text)
         nat = _normalize_nationality(nat_guess)
@@ -176,17 +198,30 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         if sex_match:
             sexo = sex_match.group(1)
     if not sexo:
-        mrz_sex_match = re.search(r"[A-Z0-9<]{10}[A-Z]{3}\d{6}[0-9<]([MFX])\d{6}", all_text_up)
+        mrz_sex_match = re.search(
+            r"[A-Z0-9<]{10}[A-Z]{3}\d{6}[0-9<]([MFX])\d{6}", all_text_up
+        )
         if mrz_sex_match:
             sexo = mrz_sex_match.group(1)
     sexo = _upper_compact(sexo)
-    father_name = _extract_labeled_value(lines, ["PADRE", "DAD", "FATHER", "NOMBRE\\s+DEL\\s+PADRE"])
-    mother_name = _extract_labeled_value(lines, ["MADRE", "MOTHER", "NOMBRE\\s+DE\\s+LA\\s+MADRE"])
+    father_name = _extract_labeled_value(
+        lines, ["PADRE", "DAD", "FATHER", "NOMBRE\\s+DEL\\s+PADRE"]
+    )
+    mother_name = _extract_labeled_value(
+        lines, ["MADRE", "MOTHER", "NOMBRE\\s+DE\\s+LA\\s+MADRE"]
+    )
     if not father_name and not mother_name:
         for i, raw in enumerate(lines):
             up = raw.upper()
-            if "HIJO/A DE" in up or "HIJO DE" in up or "HIJA DE" in up or "FILLJA DE" in up:
-                cleaned = re.sub(r".*?(HIJO/A DE|HIJO DE|HIJA DE|FILLJA DE)\s*", "", raw, flags=re.I).strip()
+            if (
+                "HIJO/A DE" in up
+                or "HIJO DE" in up
+                or "HIJA DE" in up
+                or "FILLJA DE" in up
+            ):
+                cleaned = re.sub(
+                    r".*?(HIJO/A DE|HIJO DE|HIJA DE|FILLJA DE)\s*", "", raw, flags=re.I
+                ).strip()
                 if not cleaned or _is_labelish_fragment(cleaned):
                     for j in range(i + 1, min(len(lines), i + 4)):
                         nxt = _clean_spaces(lines[j])
@@ -208,18 +243,29 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
                 break
     place_of_birth = _extract_labeled_value(
         lines,
-        ["LUGAR\\s+DE\\s+NACIMIENTO", "CITY\\s+OF\\s+BIRTH", "PLACE\\s+OF\\s+BIRTH", "МЕСТО\\s+РОЖДЕНИЯ"],
+        [
+            "LUGAR\\s+DE\\s+NACIMIENTO",
+            "CITY\\s+OF\\s+BIRTH",
+            "PLACE\\s+OF\\s+BIRTH",
+            "МЕСТО\\s+РОЖДЕНИЯ",
+        ],
     )
     if _is_invalid_place_of_birth(place_of_birth):
         place_of_birth = ""
     if not place_of_birth:
-        country_birth = _extract_labeled_value(lines, ["PAIS\\s+NACIMIENTO", "COUNTRY\\s+OF\\s+BIRTH"])
+        country_birth = _extract_labeled_value(
+            lines, ["PAIS\\s+NACIMIENTO", "COUNTRY\\s+OF\\s+BIRTH"]
+        )
         if not _is_invalid_place_of_birth(country_birth):
             place_of_birth = country_birth
     if not place_of_birth:
         for i, raw in enumerate(lines):
             up = raw.upper()
-            if not ("PLACE OF BIRTH" in up or "LUGAR DE NACIMIENTO" in up or "МЕСТО РОЖДЕНИЯ" in up):
+            if not (
+                "PLACE OF BIRTH" in up
+                or "LUGAR DE NACIMIENTO" in up
+                or "МЕСТО РОЖДЕНИЯ" in up
+            ):
                 continue
             for j in range(i + 1, min(i + 6, len(lines))):
                 cand = _clean_spaces(lines[j])
@@ -231,8 +277,18 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
                 break
             if place_of_birth:
                 break
-    father_name = re.sub(r"^(?:/)?(?:PADRE|DAD|FATHER)\s*[:\-]?\s*", "", _clean_spaces(father_name), flags=re.I)
-    mother_name = re.sub(r"^(?:/)?(?:MADRE|MOTHER)\s*[:\-]?\s*", "", _clean_spaces(mother_name), flags=re.I)
+    father_name = re.sub(
+        r"^(?:/)?(?:PADRE|DAD|FATHER)\s*[:\-]?\s*",
+        "",
+        _clean_spaces(father_name),
+        flags=re.I,
+    )
+    mother_name = re.sub(
+        r"^(?:/)?(?:MADRE|MOTHER)\s*[:\-]?\s*",
+        "",
+        _clean_spaces(mother_name),
+        flags=re.I,
+    )
     place_of_birth = re.sub(
         r"^(?:/)?(?:LUGAR\s+DE\s+NACIMIENTO|LLOC\s+DE\s+NAIXEMENT|CITY\s+OF\s+BIRTH|PLACE\s+OF\s+BIRTH|PAIS\s+NACIMIENTO|COUNTRY\s+OF\s+BIRTH)\s*[:\-]?\s*",
         "",
@@ -240,7 +296,9 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         flags=re.I,
     )
 
-    telefono = _extract_labeled_value(lines, ["TEL[ÉE]FONO", "MOVIL", "M[ÓO]VIL", "PHONE"])
+    telefono = _extract_labeled_value(
+        lines, ["TEL[ÉE]FONO", "MOVIL", "M[ÓO]VIL", "PHONE"]
+    )
     tel_match = re.search(r"(\+?\d[\d \-]{6,})", telefono)
     telefono = _clean_spaces(tel_match.group(1)) if tel_match else ""
 
@@ -262,16 +320,24 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         if email:
             break
     if not email:
-        email = _normalize_email(_extract_labeled_value(lines, ["E-?MAIL", "CORREO(?:\\s+ELECTR[ÓO]NICO)?"]))
+        email = _normalize_email(
+            _extract_labeled_value(lines, ["E-?MAIL", "CORREO(?:\\s+ELECTR[ÓO]NICO)?"])
+        )
     if not email:
         em = re.search(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", all_text_up, re.I)
         if em:
             email = _normalize_email(em.group(0))
 
-    domicilio = _extract_labeled_value(lines, ["DOMICILIO", "ADDRESS", "V[ÍI]A\\s+P[ÚU]BLICA"])
-    municipio = _extract_labeled_value(lines, ["MUNICIPIO", "LOCALIDAD", "POBLACI[ÓO]N"])
+    domicilio = _extract_labeled_value(
+        lines, ["DOMICILIO", "ADDRESS", "V[ÍI]A\\s+P[ÚU]BLICA"]
+    )
+    municipio = _extract_labeled_value(
+        lines, ["MUNICIPIO", "LOCALIDAD", "POBLACI[ÓO]N"]
+    )
     provincia = _extract_labeled_value(lines, ["PROVINCIA"])
-    cp = _extract_labeled_value(lines, ["C[ÓO]DIGO\\s+POSTAL", "CODIGO\\s+POSTAL", "\\bCP\\b"])
+    cp = _extract_labeled_value(
+        lines, ["C[ÓO]DIGO\\s+POSTAL", "CODIGO\\s+POSTAL", "\\bCP\\b"]
+    )
     cp_match = re.search(r"\b\d{5}\b", cp)
     codigo_postal = cp_match.group(0) if cp_match else ""
 
@@ -281,16 +347,18 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
     puerta = _extract_labeled_value(lines, ["PUERTA", "PTA"])
     escalera = _extract_labeled_value(lines, ["ESCALERA", "ESC"])
 
-    localidad_declaracion = _extract_labeled_value(lines, ["LOCALIDAD\\s+DE\\s+DECLARACI[ÓO]N", "EN\\s+.*A\\s+\\d{1,2}"])
+    localidad_declaracion = _extract_labeled_value(
+        lines, ["LOCALIDAD\\s+DE\\s+DECLARACI[ÓO]N", "EN\\s+.*A\\s+\\d{1,2}"]
+    )
     fecha_raw = _extract_labeled_value(lines, ["FECHA", "DECLARACI[ÓO]N"])
     fecha = ""
     if fecha_raw:
         digits = re.sub(r"[^0-9]", "", fecha_raw)
         if len(digits) == 8:
             d = digits[:2]
-            m = digits[2:4]
+            month = digits[2:4]
             y = digits[4:]
-            fecha = f"{d}/{m}/{y}"
+            fecha = f"{d}/{month}/{y}"
 
     forma_pago = _extract_labeled_value(lines, ["FORMA\\s+DE\\s+PAGO"])
     forma_pago_l = forma_pago.lower()
@@ -373,7 +441,9 @@ def _extract_visual_fields(text: str) -> dict[str, str]:
         "codigo_postal": codigo_postal,
         "telefono": telefono,
         "email": email,
-        "localidad_declaracion": localidad_declaracion.title() if localidad_declaracion else "",
+        "localidad_declaracion": (
+            localidad_declaracion.title() if localidad_declaracion else ""
+        ),
         "fecha": fecha,
         "forma_pago": forma_pago,
         "iban": iban,
@@ -409,7 +479,9 @@ def _extract_from_mrz_candidates(candidates: list[str]) -> tuple[str, str, str, 
         if re.fullmatch(r"\d{6}", dob_raw):
             yy = int(dob_raw[:2])
             year = 1900 + yy if yy > 30 else 2000 + yy
-            dob = normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+            dob = (
+                normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+            )
 
         surname = ""
         name = ""
@@ -438,7 +510,9 @@ def _extract_from_mrz_candidates(candidates: list[str]) -> tuple[str, str, str, 
         if re.fullmatch(r"\d{6}", dob_raw):
             yy = int(dob_raw[:2])
             year = 1900 + yy if yy > 30 else 2000 + yy
-            dob = normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+            dob = (
+                normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+            )
 
         surname = ""
         name = ""
@@ -457,7 +531,9 @@ def _extract_from_mrz_candidates(candidates: list[str]) -> tuple[str, str, str, 
     return "", "", "", ""
 
 
-def _extract_visa_mrz_fields(candidates: list[str]) -> tuple[str, str, str, str, str, str]:
+def _extract_visa_mrz_fields(
+    candidates: list[str],
+) -> tuple[str, str, str, str, str, str]:
     """
     Parse visa-like 2-line MRZ blocks (starting with V...).
     Returns: surname, name, passport_number, dob_iso, nationality, sex_raw.
@@ -471,7 +547,9 @@ def _extract_visa_mrz_fields(candidates: list[str]) -> tuple[str, str, str, str,
             continue
         if "<<" not in l1:
             continue
-        m2 = re.search(r"([A-Z0-9<]{9})([0-9<])([A-Z]{3})(\d{6})([0-9<])([MFX<])(\d{6})", l2)
+        m2 = re.search(
+            r"([A-Z0-9<]{9})([0-9<])([A-Z]{3})(\d{6})([0-9<])([MFX<])(\d{6})", l2
+        )
         if not m2:
             continue
 
@@ -484,7 +562,9 @@ def _extract_visa_mrz_fields(candidates: list[str]) -> tuple[str, str, str, str,
         if re.fullmatch(r"\d{6}", dob_raw):
             yy = int(dob_raw[:2])
             year = 1900 + yy if yy > 30 else 2000 + yy
-            dob = normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+            dob = (
+                normalize_date(f"{year}{dob_raw[2:]}", allow_two_digit_year=False) or ""
+            )
 
         name_line = re.sub(r"^V<?[A-Z]{3,4}", "", l1)
         name_line = name_line.lstrip("<")
@@ -633,7 +713,9 @@ def _extract_names(text: str) -> tuple[str, str, list[str]]:
                 i += 1
                 while i < len(lines):
                     if not _is_label_line(lines[i]):
-                        candidate = re.sub(r"[^A-ZÁÉÍÓÚÑÜ' -]", "", lines[i].upper()).strip()
+                        candidate = re.sub(
+                            r"[^A-ZÁÉÍÓÚÑÜ' -]", "", lines[i].upper()
+                        ).strip()
                         if candidate:
                             name_line = candidate.title()
                             break
@@ -663,7 +745,9 @@ def _extract_birth_nationality(text: str) -> tuple[str, str]:
     for i, line in enumerate(upper_lines):
         if any(k in line for k in ["FECHA NAC", "BIRTH DATE", "DOB"]):
             window = " ".join(upper_lines[i : i + 3])
-            m = re.search(r"(\d{2}[./-]\d{2}[./-]\d{4}|\d{2}\s+\d{2}\s+\d{4}|\d{8})", window)
+            m = re.search(
+                r"(\d{2}[./-]\d{2}[./-]\d{4}|\d{2}\s+\d{2}\s+\d{4}|\d{8})", window
+            )
             if m:
                 dob = normalize_date(re.sub(r"[^0-9]", "", m.group(1))) or ""
         if "NACIONALIDAD" in line or "NATIONALITY" in line:
@@ -677,7 +761,9 @@ def _extract_birth_nationality(text: str) -> tuple[str, str]:
 
     if not dob:
         all_dates = []
-        for raw in re.findall(r"\b\d{2}[./-]\d{2}[./-]\d{4}\b|\b\d{2}\s+\d{2}\s+\d{4}\b|\b\d{8}\b", text):
+        for raw in re.findall(
+            r"\b\d{2}[./-]\d{2}[./-]\d{4}\b|\b\d{2}\s+\d{2}\s+\d{4}\b|\b\d{8}\b", text
+        ):
             nd = normalize_date(re.sub(r"[^0-9]", "", raw))
             if nd:
                 all_dates.append(nd)
@@ -703,9 +789,9 @@ def _extract_from_form_pdf_tokens(text: str) -> dict[str, str]:
         _extract_checkbox_token_value(text, "DEX_SEXO", {"H", "M", "X"})
         or _extract_checkbox_token_value(text, "DS_SEXO", {"H", "M", "X"})
     )
-    estado_civil = _extract_checkbox_token_value(text, "DEX_EC", {"S", "C", "V", "D", "SP", "UH"}) or _extract_checkbox_token_value(
-        text, "DS_EC", {"S", "C", "V", "D", "SP", "UH"}
-    )
+    estado_civil = _extract_checkbox_token_value(
+        text, "DEX_EC", {"S", "C", "V", "D", "SP", "UH"}
+    ) or _extract_checkbox_token_value(text, "DS_EC", {"S", "C", "V", "D", "SP", "UH"})
     dex_nie_compact = _upper_compact(
         "".join(
             [
@@ -762,10 +848,16 @@ def _extract_from_form_pdf_tokens(text: str) -> dict[str, str]:
     }
 
 
-def _detect_form_kind(merged_upper: str, form_pdf: dict[str, str], tasa_code: str) -> str:
+def _detect_form_kind(
+    merged_upper: str, form_pdf: dict[str, str], tasa_code: str
+) -> str:
     if tasa_code and tasa_code.strip() and tasa_code.strip() != "790_012":
         return tasa_code.strip().lower()
-    if "MOVILIDAD INTERNACIONAL" in merged_upper or "MI-T" in merged_upper or "MI-F" in merged_upper:
+    if (
+        "MOVILIDAD INTERNACIONAL" in merged_upper
+        or "MI-T" in merged_upper
+        or "MI-F" in merged_upper
+    ):
         return "mi_t"
     if form_pdf and (
         "MOVILIDAD INTERNACIONAL" in merged_upper
@@ -781,7 +873,10 @@ def _detect_form_kind(merged_upper: str, form_pdf: dict[str, str], tasa_code: st
         "APELLIDOS",
         "NIF/NIE",
     ]
-    if sum(1 for marker in visual_markers if marker in merged_upper) >= 3 and not form_pdf:
+    if (
+        sum(1 for marker in visual_markers if marker in merged_upper) >= 3
+        and not form_pdf
+    ):
         return "visual_generic"
     return "790_012"
 
@@ -824,7 +919,9 @@ def _address_candidate_lines(text: str) -> list[str]:
         up = line.upper()
         if any(k in up for k in ["DOMICILIO", "DIRECCION", "DIRECCIÓN", "ADDRESS"]):
             continue
-        if (road_hint.search(up) and re.search(r"\d", up)) or ("PBJ" in up and re.search(r"\d", up)):
+        if (road_hint.search(up) and re.search(r"\d", up)) or (
+            "PBJ" in up and re.search(r"\d", up)
+        ):
             for off in range(0, 5):
                 j = idx + off
                 if j < len(lines) and not _is_noise(lines[j]):
@@ -846,7 +943,9 @@ def _parse_address_parts(address: str, overrides: dict[str, Any]) -> dict[str, s
     return _address_parse_address_parts(address, overrides)
 
 
-def _extract_city_province_from_address_lines(address_lines: list[str]) -> tuple[str, str]:
+def _extract_city_province_from_address_lines(
+    address_lines: list[str],
+) -> tuple[str, str]:
     if not address_lines:
         return "", ""
     clean_lines: list[str] = []
@@ -854,11 +953,23 @@ def _extract_city_province_from_address_lines(address_lines: list[str]) -> tuple
         up = raw.upper().strip()
         if not up:
             continue
-        if "/" in up and any(k in up for k in ["LUGAR", "NACIMIENTO", "DOMICILIO", "ADDRESS"]):
+        if "/" in up and any(
+            k in up for k in ["LUGAR", "NACIMIENTO", "DOMICILIO", "ADDRESS"]
+        ):
             continue
         if _is_labelish_fragment(up):
             continue
-        if up in {"CALLE", "AVENIDA", "PLAZA", "PASEO", "PASAJE", "CAMINO", "CARRETERA", "TRAVESIA", "DOMICILI"}:
+        if up in {
+            "CALLE",
+            "AVENIDA",
+            "PLAZA",
+            "PASEO",
+            "PASAJE",
+            "CAMINO",
+            "CARRETERA",
+            "TRAVESIA",
+            "DOMICILI",
+        }:
             continue
         if re.search(r"\d", up) and len(clean_lines) == 0:
             # likely first line street
@@ -918,7 +1029,9 @@ def _apply_geocode(
     if not address_freeform or not geocode_candidates:
         return "", "", [], parts
 
-    best = max(geocode_candidates, key=lambda c: _score_address_candidate(address_freeform, c))
+    best = max(
+        geocode_candidates, key=lambda c: _score_address_candidate(address_freeform, c)
+    )
     normalized = _safe(best.get("formatted_address"))
     place_id = _safe(best.get("place_id"))
     discrepancies: list[dict[str, str]] = []
@@ -933,21 +1046,32 @@ def _apply_geocode(
     for field, geo_val in mapping.items():
         cur = _safe(parts.get(field))
         if cur and geo_val and cur.upper() != geo_val.upper():
-            discrepancies.append({"field": field, "ocr_or_override": cur, "geocode": geo_val})
+            discrepancies.append(
+                {"field": field, "ocr_or_override": cur, "geocode": geo_val}
+            )
         if not cur and geo_val:
             parts[field] = geo_val
     return normalized, place_id, discrepancies, parts
 
 
-def _build_validation(fields: dict[str, Any], required_fields: list[str]) -> dict[str, Any]:
+def _build_validation(
+    fields: dict[str, Any], required_fields: list[str]
+) -> dict[str, Any]:
     missing = [f for f in required_fields if not _safe(fields.get(f))]
     needs = sorted(set(missing))
 
     forma_pago = _safe(fields.get("forma_pago")).lower()
-    if "forma_pago" in required_fields and forma_pago in {"adeudo", "adeudo en cuenta"} and not fields.get("iban"):
+    if (
+        "forma_pago" in required_fields
+        and forma_pago in {"adeudo", "adeudo en cuenta"}
+        and not fields.get("iban")
+    ):
         missing.append("iban")
         needs.append("iban")
-    if "autoliquidacion_tipo" in fields and fields.get("autoliquidacion_tipo", "").lower() == "complementaria":
+    if (
+        "autoliquidacion_tipo" in fields
+        and fields.get("autoliquidacion_tipo", "").lower() == "complementaria"
+    ):
         if not fields.get("num_justificante"):
             missing.append("num_justificante")
             needs.append("num_justificante")
@@ -957,7 +1081,11 @@ def _build_validation(fields: dict[str, Any], required_fields: list[str]) -> dic
 
     return {
         "ok": len(set(missing)) == 0,
-        "errors": [] if len(set(missing)) == 0 else ["Missing required fields for tasa form completion."],
+        "errors": (
+            []
+            if len(set(missing)) == 0
+            else ["Missing required fields for tasa form completion."]
+        ),
         "warnings": [],
         "missing_required_for_form": sorted(set(missing)),
         "needs_user_input": sorted(set(needs)),
@@ -979,20 +1107,37 @@ def build_tasa_document(
     merged = "\n".join(x for x in [ocr_front, ocr_back] if x).strip()
     merged_upper = merged.upper()
     source_kind_norm = _safe(source_kind).lower() or "anketa"
-    is_form_source = source_kind_norm in {"anketa", "fmiliar", "familiar", "form", "formulario", "questionnaire"}
+    is_form_source = source_kind_norm in {
+        "anketa",
+        "fmiliar",
+        "familiar",
+        "form",
+        "formulario",
+        "questionnaire",
+    }
     is_identity_source = source_kind_norm in {"passport", "nie_tie", "visa"}
     form_pdf = _extract_from_form_pdf_tokens(merged)
     visual_fields = _extract_visual_fields(merged)
     mrz_candidates = _find_mrz_candidates(merged)
     mrz = parse_mrz_lines(mrz_candidates)
-    mrz_surname, mrz_name, mrz_dob, mrz_nat = _extract_from_mrz_candidates(mrz_candidates)
-    visa_mrz_surname, visa_mrz_name, visa_mrz_passport, visa_mrz_dob, visa_mrz_nat, visa_mrz_sex = _extract_visa_mrz_fields(
+    mrz_surname, mrz_name, mrz_dob, mrz_nat = _extract_from_mrz_candidates(
         mrz_candidates
     )
+    (
+        visa_mrz_surname,
+        visa_mrz_name,
+        visa_mrz_passport,
+        visa_mrz_dob,
+        visa_mrz_nat,
+        visa_mrz_sex,
+    ) = _extract_visa_mrz_fields(mrz_candidates)
     doc_candidates = _extract_doc_candidates(merged)
-    if form_pdf.get("nie_or_nif"):
-        doc_candidates = [form_pdf["nie_or_nif"], *doc_candidates]
+    form_pdf_nie_or_nif = _upper_compact(_safe(form_pdf.get("nie_or_nif")))
+    if form_pdf_nie_or_nif:
+        doc_candidates = [form_pdf_nie_or_nif, *doc_candidates]
     nie_or_nif = _safe(overrides.get("nie_or_nif")) or _pick_valid_doc(doc_candidates)
+    if not nie_or_nif and form_pdf_nie_or_nif:
+        nie_or_nif = form_pdf_nie_or_nif
     if not nie_or_nif and mrz:
         nie_or_nif = mrz.document_number
     if not nie_or_nif and visual_fields.get("nif_nie"):
@@ -1005,8 +1150,10 @@ def build_tasa_document(
     )
     nie_or_nif = _upper_compact(nie_or_nif)
     if nie_or_nif and not validate_spanish_document_number(nie_or_nif):
+        if form_pdf_nie_or_nif and nie_or_nif == form_pdf_nie_or_nif:
+            pass
         # For non NIE/NIF flows (e.g. passport-based forms), keep the value as generic identity document.
-        if not passport_number or _upper_compact(nie_or_nif) != passport_number:
+        elif not passport_number or _upper_compact(nie_or_nif) != passport_number:
             nie_or_nif = ""
 
     apellidos, nombre, name_candidates = _extract_names(merged)
@@ -1034,9 +1181,13 @@ def build_tasa_document(
 
     apellidos = _clean_spaces(_safe(overrides.get("apellidos")) or apellidos)
     nombre = _clean_spaces(_safe(overrides.get("nombre")) or nombre)
-    if (not apellidos or _looks_like_name_noise(apellidos)) and _safe(visual_fields.get("apellidos")):
+    if (not apellidos or _looks_like_name_noise(apellidos)) and _safe(
+        visual_fields.get("apellidos")
+    ):
         apellidos = _clean_spaces(_safe(visual_fields.get("apellidos")))
-    if (not nombre or _looks_like_name_noise(nombre)) and _safe(visual_fields.get("nombre")):
+    if (not nombre or _looks_like_name_noise(nombre)) and _safe(
+        visual_fields.get("nombre")
+    ):
         nombre = _clean_spaces(_safe(visual_fields.get("nombre")))
     mrz_identity_present = bool(
         (mrz and (mrz.surname or mrz.name or mrz.date_of_birth or mrz.nationality))
@@ -1047,13 +1198,27 @@ def build_tasa_document(
     )
     if form_pdf:
         if not apellidos or not mrz_identity_present:
-            apellidos = _clean_spaces(_safe(overrides.get("apellidos")) or form_pdf.get("apellidos") or apellidos)
+            apellidos = _clean_spaces(
+                _safe(overrides.get("apellidos"))
+                or form_pdf.get("apellidos")
+                or apellidos
+            )
         if not nombre or not mrz_identity_present:
-            nombre = _clean_spaces(_safe(overrides.get("nombre")) or form_pdf.get("nombre") or nombre)
+            nombre = _clean_spaces(
+                _safe(overrides.get("nombre")) or form_pdf.get("nombre") or nombre
+            )
         if not fecha_nacimiento or not mrz_identity_present:
-            fecha_nacimiento = _safe(overrides.get("fecha_nacimiento")) or form_pdf.get("fecha_nacimiento") or fecha_nacimiento
+            fecha_nacimiento = (
+                _safe(overrides.get("fecha_nacimiento"))
+                or form_pdf.get("fecha_nacimiento")
+                or fecha_nacimiento
+            )
         if not nacionalidad or not mrz_identity_present:
-            nacionalidad = _safe(overrides.get("nacionalidad")) or form_pdf.get("nacionalidad") or nacionalidad
+            nacionalidad = (
+                _safe(overrides.get("nacionalidad"))
+                or form_pdf.get("nacionalidad")
+                or nacionalidad
+            )
 
     if not fecha_nacimiento:
         fecha_nacimiento = _safe(visual_fields.get("fecha_nacimiento"))
@@ -1066,8 +1231,16 @@ def build_tasa_document(
         or _safe(form_pdf.get("lugar_nacimiento"))
         or _safe(visual_fields.get("lugar_nacimiento"))
     )
-    nombre_padre = _safe(overrides.get("nombre_padre")) or _safe(form_pdf.get("nombre_padre")) or _safe(visual_fields.get("nombre_padre"))
-    nombre_madre = _safe(overrides.get("nombre_madre")) or _safe(form_pdf.get("nombre_madre")) or _safe(visual_fields.get("nombre_madre"))
+    nombre_padre = (
+        _safe(overrides.get("nombre_padre"))
+        or _safe(form_pdf.get("nombre_padre"))
+        or _safe(visual_fields.get("nombre_padre"))
+    )
+    nombre_madre = (
+        _safe(overrides.get("nombre_madre"))
+        or _safe(form_pdf.get("nombre_madre"))
+        or _safe(visual_fields.get("nombre_madre"))
+    )
     documento_tipo = _safe(overrides.get("documento_tipo")).lower()
     if documento_tipo not in {"pasaporte", "nif_tie_nie_dni"}:
         if source_kind_norm in {"passport", "visa"}:
@@ -1075,7 +1248,11 @@ def build_tasa_document(
         elif source_kind_norm == "nie_tie":
             documento_tipo = "nif_tie_nie_dni"
         else:
-            documento_tipo = "nif_tie_nie_dni" if validate_spanish_document_number(nie_or_nif) else "pasaporte"
+            documento_tipo = (
+                "nif_tie_nie_dni"
+                if validate_spanish_document_number(nie_or_nif)
+                else "pasaporte"
+            )
     sexo_raw = (
         _safe(overrides.get("sexo"))
         or _safe(form_pdf.get("sexo"))
@@ -1083,14 +1260,20 @@ def build_tasa_document(
         or _safe(visual_fields.get("sexo"))
     )
     sexo_extracted = (
-        _normalize_document_sex_code(sexo_raw) if is_identity_source else _normalize_sex_code(sexo_raw)
+        _normalize_document_sex_code(sexo_raw)
+        if is_identity_source
+        else _normalize_sex_code(sexo_raw)
     )
 
     visual_full_name = _clean_spaces(_safe(visual_fields.get("full_name")))
-    if _looks_like_name_noise(visual_full_name) or _is_labelish_fragment(visual_full_name):
+    if _looks_like_name_noise(visual_full_name) or _is_labelish_fragment(
+        visual_full_name
+    ):
         visual_full_name = ""
     full_name = _clean_spaces(
-        _safe(overrides.get("full_name")) or f"{apellidos} {nombre}".strip() or visual_full_name
+        _safe(overrides.get("full_name"))
+        or f"{apellidos} {nombre}".strip()
+        or visual_full_name
     )
 
     address_lines = _address_candidate_lines(merged) if is_form_source else []
@@ -1109,7 +1292,9 @@ def build_tasa_document(
         address_lines = [x for x in synthetic if x]
     # Deduplicate while preserving order to avoid noisy repeated lines.
     dedup_lines = list(dict.fromkeys(address_lines))
-    address_freeform = _safe(overrides.get("address_freeform")) or " ".join(dedup_lines).strip()
+    address_freeform = (
+        _safe(overrides.get("address_freeform")) or " ".join(dedup_lines).strip()
+    )
     address_freeform = _clean_address_freeform(address_freeform)
     address_expanded, abbr_used = _expand_abbrev(address_freeform)
     address_parts = _parse_address_parts(address_expanded, overrides)
@@ -1138,7 +1323,9 @@ def build_tasa_document(
 
     effective_geocode = geocode_candidates
     if not effective_geocode and google_maps_api_key and address_expanded:
-        effective_geocode = fetch_geocode_candidates(address_expanded, google_maps_api_key, region="es")
+        effective_geocode = fetch_geocode_candidates(
+            address_expanded, google_maps_api_key, region="es"
+        )
 
     city_from_text, province_from_text = _extract_city_province_from_text(merged)
     if not address_parts.get("municipio") and city_from_text:
@@ -1164,7 +1351,9 @@ def build_tasa_document(
             f"{address_parts.get('tipo_via', '')} {address_parts['nombre_via_publica']} {address_parts['numero']}, "
             f"{address_parts['municipio']}, {address_parts.get('provincia', '')}, España"
         )
-        effective_geocode = fetch_geocode_candidates(query2, google_maps_api_key, region="es")
+        effective_geocode = fetch_geocode_candidates(
+            query2, google_maps_api_key, region="es"
+        )
 
     normalized_address, place_id, discrepancies, address_parts = _apply_geocode(
         address_expanded, effective_geocode, address_parts
@@ -1173,7 +1362,10 @@ def build_tasa_document(
     fields_790 = {
         "nif_nie": _safe(overrides.get("nif_nie")) or nie_or_nif,
         "pasaporte": _safe(overrides.get("pasaporte")) or passport_number,
-        "apellidos_nombre_razon_social": _safe(overrides.get("apellidos_nombre_razon_social")) or full_name,
+        "apellidos_nombre_razon_social": _safe(
+            overrides.get("apellidos_nombre_razon_social")
+        )
+        or full_name,
         "tipo_via": _safe(address_parts.get("tipo_via")),
         "nombre_via_publica": _safe(address_parts.get("nombre_via_publica")),
         "numero": _safe(address_parts.get("numero")),
@@ -1184,7 +1376,8 @@ def build_tasa_document(
         "email": _normalize_email(overrides.get("email"))
         or _normalize_email(form_pdf.get("email"))
         or _normalize_email(visual_fields.get("email")),
-        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
+        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento")))
+        or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
         "lugar_nacimiento": lugar_nacimiento,
         "nombre_padre": nombre_padre,
@@ -1198,23 +1391,34 @@ def build_tasa_document(
         "localidad_declaracion": _safe(overrides.get("localidad_declaracion"))
         or _safe(form_pdf.get("localidad_declaracion"))
         or _safe(visual_fields.get("localidad_declaracion")),
-        "fecha": _safe(overrides.get("fecha")) or _safe(form_pdf.get("fecha_declaracion")) or _safe(visual_fields.get("fecha")),
+        "fecha": _safe(overrides.get("fecha"))
+        or _safe(form_pdf.get("fecha_declaracion"))
+        or _safe(visual_fields.get("fecha")),
         "importe_euros": overrides.get("importe_euros"),
-        "forma_pago": _safe(overrides.get("forma_pago")) or _safe(visual_fields.get("forma_pago")),
+        "forma_pago": _safe(overrides.get("forma_pago"))
+        or _safe(visual_fields.get("forma_pago")),
         "iban": _safe(overrides.get("iban")) or _safe(visual_fields.get("iban")),
     }
     if not fields_790["telefono"] and visual_fields.get("telefono"):
         fields_790["telefono"] = _safe(visual_fields.get("telefono"))
 
     familiar_ref = {
-        "nie_or_nif": _safe(overrides.get("familiar_nie_or_nif")) or _safe(form_pdf.get("familiar_nie_or_nif")),
-        "pasaporte": _safe(overrides.get("familiar_pasaporte")) or _safe(form_pdf.get("familiar_pasaporte")),
-        "apellidos": _safe(overrides.get("familiar_apellidos")) or _safe(form_pdf.get("familiar_apellidos")),
-        "nombre": _safe(overrides.get("familiar_nombre")) or _safe(form_pdf.get("familiar_nombre")),
+        "nie_or_nif": _safe(overrides.get("familiar_nie_or_nif"))
+        or _safe(form_pdf.get("familiar_nie_or_nif")),
+        "pasaporte": _safe(overrides.get("familiar_pasaporte"))
+        or _safe(form_pdf.get("familiar_pasaporte")),
+        "apellidos": _safe(overrides.get("familiar_apellidos"))
+        or _safe(form_pdf.get("familiar_apellidos")),
+        "nombre": _safe(overrides.get("familiar_nombre"))
+        or _safe(form_pdf.get("familiar_nombre")),
     }
     familiar_ref["full_name"] = _clean_spaces(
         _safe(overrides.get("familiar_full_name"))
-        or " ".join(x for x in [familiar_ref.get("apellidos", ""), familiar_ref.get("nombre", "")] if x)
+        or " ".join(
+            x
+            for x in [familiar_ref.get("apellidos", ""), familiar_ref.get("nombre", "")]
+            if x
+        )
     )
 
     fields_mi_t = {
@@ -1226,7 +1430,8 @@ def build_tasa_document(
         "apellidos": _safe(overrides.get("apellidos")) or apellidos,
         "nombre": _safe(overrides.get("nombre")) or nombre,
         "full_name": full_name,
-        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
+        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento")))
+        or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
         "sexo": sexo_extracted,
         "estado_civil": _safe(overrides.get("estado_civil"))
@@ -1250,11 +1455,14 @@ def build_tasa_document(
         "codigo_postal": _safe(address_parts.get("codigo_postal")),
         "localidad_declaracion": _safe(overrides.get("localidad_declaracion"))
         or _safe(form_pdf.get("localidad_declaracion")),
-        "fecha": _safe(overrides.get("fecha")) or _safe(form_pdf.get("fecha_declaracion")),
+        "fecha": _safe(overrides.get("fecha"))
+        or _safe(form_pdf.get("fecha_declaracion")),
         "representante_apellidos": _safe(overrides.get("representante_apellidos"))
         or _safe(form_pdf.get("representante_apellidos")),
-        "representante_nombre": _safe(overrides.get("representante_nombre")) or _safe(form_pdf.get("representante_nombre")),
-        "representante_dni": _safe(overrides.get("representante_dni")) or _safe(form_pdf.get("representante_dni")),
+        "representante_nombre": _safe(overrides.get("representante_nombre"))
+        or _safe(form_pdf.get("representante_nombre")),
+        "representante_dni": _safe(overrides.get("representante_dni"))
+        or _safe(form_pdf.get("representante_dni")),
         "representante_telefono": _safe(overrides.get("representante_telefono"))
         or _safe(form_pdf.get("representante_telefono")),
         "representante_email": _normalize_email(overrides.get("representante_email"))
@@ -1270,6 +1478,7 @@ def build_tasa_document(
     if is_identity_source and form_kind == "790_012":
         # Uploaded source is an identity document (not a form), keep extraction but avoid forcing form-specific strategy.
         form_kind = "visual_generic"
+    base_fields: dict[str, Any]
     if form_kind == "790_012":
         required_for_form = REQUIRED_FIELDS_790_012
         base_fields = fields_790
@@ -1279,18 +1488,30 @@ def build_tasa_document(
     else:
         required_for_form = REQUIRED_FIELDS_VISUAL_GENERIC
         base_fields = {
-            "nif_nie": _safe(overrides.get("nif_nie")) or _safe(visual_fields.get("nif_nie")) or nie_or_nif,
-            "pasaporte": _safe(overrides.get("pasaporte")) or _safe(visual_fields.get("pasaporte")) or passport_number,
-            "apellidos_nombre_razon_social": _safe(overrides.get("apellidos_nombre_razon_social")) or full_name,
+            "nif_nie": _safe(overrides.get("nif_nie"))
+            or _safe(visual_fields.get("nif_nie"))
+            or nie_or_nif,
+            "pasaporte": _safe(overrides.get("pasaporte"))
+            or _safe(visual_fields.get("pasaporte"))
+            or passport_number,
+            "apellidos_nombre_razon_social": _safe(
+                overrides.get("apellidos_nombre_razon_social")
+            )
+            or full_name,
             "tipo_via": _safe(address_parts.get("tipo_via")),
             "nombre_via_publica": _safe(address_parts.get("nombre_via_publica")),
             "numero": _safe(address_parts.get("numero")),
             "escalera": _safe(address_parts.get("escalera")),
             "piso": _safe(address_parts.get("piso")),
             "puerta": _safe(address_parts.get("puerta")),
-            "telefono": _safe(overrides.get("telefono")) or _safe(visual_fields.get("telefono")),
-            "email": _normalize_email(overrides.get("email")) or _normalize_email(visual_fields.get("email")),
-            "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
+            "telefono": _safe(overrides.get("telefono"))
+            or _safe(visual_fields.get("telefono")),
+            "email": _normalize_email(overrides.get("email"))
+            or _normalize_email(visual_fields.get("email")),
+            "fecha_nacimiento": _to_spanish_date(
+                _safe(overrides.get("fecha_nacimiento"))
+            )
+            or fecha_nacimiento,
             "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
             "lugar_nacimiento": lugar_nacimiento,
             "nombre_padre": nombre_padre,
@@ -1301,7 +1522,8 @@ def build_tasa_document(
             "localidad_declaracion": _safe(overrides.get("localidad_declaracion"))
             or _safe(visual_fields.get("localidad_declaracion")),
             "fecha": _safe(overrides.get("fecha")) or _safe(visual_fields.get("fecha")),
-            "forma_pago": _safe(overrides.get("forma_pago")) or _safe(visual_fields.get("forma_pago")),
+            "forma_pago": _safe(overrides.get("forma_pago"))
+            or _safe(visual_fields.get("forma_pago")),
             "iban": _safe(overrides.get("iban")) or _safe(visual_fields.get("iban")),
         }
     validation = _build_validation(base_fields, required_for_form)
@@ -1311,12 +1533,16 @@ def build_tasa_document(
         validation["missing_required_for_form"] = sorted(
             set(validation["missing_required_for_form"] + ["nif_nie"])
         )
-        validation["needs_user_input"] = sorted(set(validation["needs_user_input"] + ["nif_nie"]))
+        validation["needs_user_input"] = sorted(
+            set(validation["needs_user_input"] + ["nif_nie"])
+        )
 
     if not address_expanded:
         validation["warnings"].append("Address not found in OCR or overrides.")
     if form_kind == "visual_generic":
-        validation["warnings"].append("Visual OCR mode: low-confidence handwritten extraction.")
+        validation["warnings"].append(
+            "Visual OCR mode: low-confidence handwritten extraction."
+        )
 
     card_extracted = {
         "documento_tipo": documento_tipo,
@@ -1326,7 +1552,8 @@ def build_tasa_document(
         "apellidos": apellidos,
         "nombre": nombre,
         "full_name": full_name,
-        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento"))) or fecha_nacimiento,
+        "fecha_nacimiento": _to_spanish_date(_safe(overrides.get("fecha_nacimiento")))
+        or fecha_nacimiento,
         "nacionalidad": _safe(overrides.get("nacionalidad")) or nacionalidad,
         "sexo": sexo_extracted,
         "estado_civil": _safe(overrides.get("estado_civil"))
@@ -1335,7 +1562,8 @@ def build_tasa_document(
         "lugar_nacimiento": lugar_nacimiento,
         "nombre_padre": nombre_padre,
         "nombre_madre": nombre_madre,
-        "id_esp_optional": _safe(overrides.get("id_esp_optional")) or _extract_idesp(merged_upper),
+        "id_esp_optional": _safe(overrides.get("id_esp_optional"))
+        or _extract_idesp(merged_upper),
         "raw_candidates": {
             "nie_or_nif": doc_candidates,
             "full_name": [x for x in [full_name, *name_candidates] if x],
@@ -1383,7 +1611,11 @@ def build_tasa_document(
     return {
         "_id": {"$oid": uuid.uuid4().hex[:24]},
         "schema_version": "1.2.0",
-        "document_type": "nie_tie_tasa_payload" if source_kind_norm != "visa" else "visa_tasa_payload",
+        "document_type": (
+            "nie_tie_tasa_payload"
+            if source_kind_norm != "visa"
+            else "visa_tasa_payload"
+        ),
         "tasa_code": tasa_code,
         "source": {
             "source_file": source_file,
@@ -1396,7 +1628,9 @@ def build_tasa_document(
         "forms": forms,
         "form_790_012": form_790_012,
         "form_mi_t": form_mi_t if form_kind != "790_012" else {},
-        "form_visual_generic": form_visual_generic if form_kind == "visual_generic" else {},
+        "form_visual_generic": (
+            form_visual_generic if form_kind == "visual_generic" else {}
+        ),
         "validation": validation,
         "discrepancies": discrepancies,
         "reference": {

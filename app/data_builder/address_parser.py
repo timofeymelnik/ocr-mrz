@@ -89,7 +89,9 @@ def parse_address_parts(address: str, overrides: dict[str, Any]) -> dict[str, st
             fields["codigo_postal"] = match.group(1)
 
     if not fields["municipio"] or not fields["provincia"]:
-        match = re.search(r"\b([A-ZÁÉÍÓÚÑÜ]{3,})\s+([A-ZÁÉÍÓÚÑÜ]{3,})\s*-\s*ESP\b", upper)
+        match = re.search(
+            r"\b([A-ZÁÉÍÓÚÑÜ]{3,})\s+([A-ZÁÉÍÓÚÑÜ]{3,})\s*-\s*ESP\b", upper
+        )
         if match:
             if not fields["municipio"]:
                 fields["municipio"] = match.group(1).title()

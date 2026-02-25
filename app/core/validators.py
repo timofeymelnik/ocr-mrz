@@ -23,6 +23,12 @@ class ValidationError(ValueError):
     pass
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 def _normalize_sex_code(value: str) -> str:
     v = re.sub(r"[^A-Z]", "", (value or "").upper())
     if not v:
@@ -139,7 +145,9 @@ def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("extra", {})
     payload.setdefault("referencias", {})
 
-    ident = payload["identificacion"] if isinstance(payload["identificacion"], dict) else {}
+    ident = (
+        payload["identificacion"] if isinstance(payload["identificacion"], dict) else {}
+    )
     if not isinstance(payload["identificacion"], dict):
         payload["identificacion"] = ident
     decl = payload["declarante"] if isinstance(payload["declarante"], dict) else {}
@@ -148,7 +156,11 @@ def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     if doc_type not in {"pasaporte", "nif_tie_nie_dni"}:
         pasaporte = str(ident.get("pasaporte", "") or "").strip()
         nif_nie = str(ident.get("nif_nie", "") or "").strip()
-        doc_type = "pasaporte" if pasaporte and (not nif_nie or nif_nie == pasaporte) else "nif_tie_nie_dni"
+        doc_type = (
+            "pasaporte"
+            if pasaporte and (not nif_nie or nif_nie == pasaporte)
+            else "nif_tie_nie_dni"
+        )
     ident["documento_tipo"] = doc_type
 
     composed_decl = _compose_ddmmyyyy(
@@ -187,7 +199,9 @@ def _apply_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _split_identity_name(full_name: str, apellidos: str = "", nombre: str = "") -> tuple[str, str, str]:
+def _split_identity_name(
+    full_name: str, apellidos: str = "", nombre: str = ""
+) -> tuple[str, str, str]:
     def _norm_token(v: str) -> str:
         return re.sub(r"[^a-z0-9]", "", (v or "").lower())
 
@@ -232,7 +246,7 @@ def _split_identity_name(full_name: str, apellidos: str = "", nombre: str = "") 
     return tokens[0], tokens[1], " ".join(tokens[2:])
 
 
-def _require_path_or_json(raw: str) -> dict[str, Any]:
+def _require_path_or_json(raw: str) -> Any:
     possible_path = Path(raw)
     if possible_path.exists() and possible_path.is_file():
         if possible_path.suffix.lower() == ".jsonl":
@@ -261,14 +275,17 @@ def load_input_payload(raw_json_or_path: str) -> dict[str, Any]:
 
 
 def _pick_form_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    forms = payload.get("forms") if isinstance(payload.get("forms"), dict) else {}
-    form_790 = payload.get("form_790_012") if isinstance(payload.get("form_790_012"), dict) else {}
-    direct_790 = form_790.get("fields") if isinstance(form_790.get("fields"), dict) else {}
+    forms = _as_dict(payload.get("forms"))
+    form_790 = _as_dict(payload.get("form_790_012"))
+    direct_790 = _as_dict(form_790.get("fields"))
 
     tasa_code = str(payload.get("tasa_code", "") or "").strip().lower()
 
     def _has_identity(fields: dict[str, Any]) -> bool:
-        return bool(str(fields.get("nif_nie", "") or "").strip() or str(fields.get("pasaporte", "") or "").strip())
+        return bool(
+            str(fields.get("nif_nie", "") or "").strip()
+            or str(fields.get("pasaporte", "") or "").strip()
+        )
 
     # 1) explicit tasa form
     if tasa_code and isinstance(forms.get(tasa_code), dict):
@@ -298,21 +315,34 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
         return _apply_defaults(payload)
 
     # OCR document shape -> form payload shape
-    pipeline_payload = (((payload.get("pipeline") or {}).get("artifacts") or {}).get("form_payload_for_playwright"))
-    if isinstance(pipeline_payload, dict) and "identificacion" in pipeline_payload and "domicilio" in pipeline_payload:
+    pipeline_payload = _as_dict(
+        _as_dict(_as_dict(payload.get("pipeline")).get("artifacts")).get(
+            "form_payload_for_playwright"
+        )
+    )
+    if (
+        isinstance(pipeline_payload, dict)
+        and "identificacion" in pipeline_payload
+        and "domicilio" in pipeline_payload
+    ):
         return _apply_defaults(pipeline_payload)
 
     fields = _pick_form_fields(payload)
     if isinstance(fields, dict) and fields:
         municipio = str(fields.get("municipio", "") or "")
         localidad_declaracion = str(fields.get("localidad_declaracion", "") or "")
-        card = payload.get("card_extracted") if isinstance(payload.get("card_extracted"), dict) else {}
-        card_familiar = card.get("familiar_que_da_derecho") if isinstance(card.get("familiar_que_da_derecho"), dict) else {}
+        card = _as_dict(payload.get("card_extracted"))
+        card_familiar = _as_dict(card.get("familiar_que_da_derecho"))
         nombre_apellidos = (
             str(fields.get("apellidos_nombre_razon_social", "") or "")
             or str(fields.get("full_name", "") or "")
             or " ".join(
-                x for x in [str(fields.get("apellidos", "") or "").strip(), str(fields.get("nombre", "") or "").strip()] if x
+                x
+                for x in [
+                    str(fields.get("apellidos", "") or "").strip(),
+                    str(fields.get("nombre", "") or "").strip(),
+                ]
+                if x
             )
         )
         primer_apellido, segundo_apellido, nombre = _split_identity_name(
@@ -325,7 +355,12 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
             or str(card.get("documento_tipo", "") or "").strip().lower()
         )
         if doc_type not in {"pasaporte", "nif_tie_nie_dni"}:
-            doc_type = "pasaporte" if str(fields.get("pasaporte", "") or "").strip() and not str(fields.get("nif_nie", "") or "").strip() else "nif_tie_nie_dni"
+            doc_type = (
+                "pasaporte"
+                if str(fields.get("pasaporte", "") or "").strip()
+                and not str(fields.get("nif_nie", "") or "").strip()
+                else "nif_tie_nie_dni"
+            )
         nif_nie = str(fields.get("nif_nie", "") or "").strip()
         if not nif_nie and doc_type != "pasaporte":
             nif_nie = str(fields.get("pasaporte", "") or "").strip()
@@ -355,7 +390,10 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
                 "cp": str(fields.get("codigo_postal", "") or ""),
             },
             "autoliquidacion": {
-                "tipo": str(fields.get("autoliquidacion_tipo", "") or "principal").lower() or "principal",
+                "tipo": str(
+                    fields.get("autoliquidacion_tipo", "") or "principal"
+                ).lower()
+                or "principal",
                 "num_justificante": str(fields.get("num_justificante", "") or ""),
                 "importe_complementaria": fields.get("importe_complementaria"),
             },
@@ -374,45 +412,104 @@ def normalize_payload_for_form(payload: dict[str, Any]) -> dict[str, Any]:
             "extra": {
                 "email": str(fields.get("email", "") or ""),
                 "fecha_nacimiento": to_spanish_date(
-                    str(fields.get("fecha_nacimiento", "") or card.get("fecha_nacimiento", "") or "")
+                    str(
+                        fields.get("fecha_nacimiento", "")
+                        or card.get("fecha_nacimiento", "")
+                        or ""
+                    )
                 ),
-                "fecha_nacimiento_dia": str(fields.get("fecha_nacimiento_dia", "") or ""),
-                "fecha_nacimiento_mes": str(fields.get("fecha_nacimiento_mes", "") or ""),
-                "fecha_nacimiento_anio": str(fields.get("fecha_nacimiento_anio", "") or ""),
-                "nacionalidad": str(fields.get("nacionalidad", "") or card.get("nacionalidad", "") or ""),
-                "pais_nacimiento": str(fields.get("pais_nacimiento", "") or card.get("pais_nacimiento", "") or ""),
-                "sexo": _normalize_sex_code(str(fields.get("sexo", "") or card.get("sexo", "") or "")),
-                "estado_civil": str(fields.get("estado_civil", "") or card.get("estado_civil", "") or ""),
-                "lugar_nacimiento": str(fields.get("lugar_nacimiento", "") or card.get("lugar_nacimiento", "") or ""),
-                "nombre_padre": str(fields.get("nombre_padre", "") or card.get("nombre_padre", "") or ""),
-                "nombre_madre": str(fields.get("nombre_madre", "") or card.get("nombre_madre", "") or ""),
+                "fecha_nacimiento_dia": str(
+                    fields.get("fecha_nacimiento_dia", "") or ""
+                ),
+                "fecha_nacimiento_mes": str(
+                    fields.get("fecha_nacimiento_mes", "") or ""
+                ),
+                "fecha_nacimiento_anio": str(
+                    fields.get("fecha_nacimiento_anio", "") or ""
+                ),
+                "nacionalidad": str(
+                    fields.get("nacionalidad", "") or card.get("nacionalidad", "") or ""
+                ),
+                "pais_nacimiento": str(
+                    fields.get("pais_nacimiento", "")
+                    or card.get("pais_nacimiento", "")
+                    or ""
+                ),
+                "sexo": _normalize_sex_code(
+                    str(fields.get("sexo", "") or card.get("sexo", "") or "")
+                ),
+                "estado_civil": str(
+                    fields.get("estado_civil", "") or card.get("estado_civil", "") or ""
+                ),
+                "lugar_nacimiento": str(
+                    fields.get("lugar_nacimiento", "")
+                    or card.get("lugar_nacimiento", "")
+                    or ""
+                ),
+                "nombre_padre": str(
+                    fields.get("nombre_padre", "") or card.get("nombre_padre", "") or ""
+                ),
+                "nombre_madre": str(
+                    fields.get("nombre_madre", "") or card.get("nombre_madre", "") or ""
+                ),
                 "representante_legal": str(fields.get("representante_legal", "") or ""),
-                "representante_documento": str(fields.get("representante_documento", "") or ""),
-                "titulo_representante": str(fields.get("titulo_representante", "") or ""),
-                "hijos_escolarizacion_espana": str(fields.get("hijos_escolarizacion_espana", "") or ""),
+                "representante_documento": str(
+                    fields.get("representante_documento", "") or ""
+                ),
+                "titulo_representante": str(
+                    fields.get("titulo_representante", "") or ""
+                ),
+                "hijos_escolarizacion_espana": str(
+                    fields.get("hijos_escolarizacion_espana", "") or ""
+                ),
             },
             "referencias": {
                 "familiar_que_da_derecho": {
-                    "nif_nie": str(fields.get("familiar_nif_nie", "") or card_familiar.get("nie_or_nif", "") or ""),
-                    "pasaporte": str(fields.get("familiar_pasaporte", "") or card_familiar.get("pasaporte", "") or ""),
+                    "nif_nie": str(
+                        fields.get("familiar_nif_nie", "")
+                        or card_familiar.get("nie_or_nif", "")
+                        or ""
+                    ),
+                    "pasaporte": str(
+                        fields.get("familiar_pasaporte", "")
+                        or card_familiar.get("pasaporte", "")
+                        or ""
+                    ),
                     "nombre_apellidos": (
                         str(fields.get("familiar_full_name", "") or "")
                         or str(card_familiar.get("full_name", "") or "")
                         or " ".join(
                             x
                             for x in [
-                                str(fields.get("familiar_apellidos", "") or card_familiar.get("apellidos", "") or "").strip(),
-                                str(fields.get("familiar_nombre", "") or card_familiar.get("nombre", "") or "").strip(),
+                                str(
+                                    fields.get("familiar_apellidos", "")
+                                    or card_familiar.get("apellidos", "")
+                                    or ""
+                                ).strip(),
+                                str(
+                                    fields.get("familiar_nombre", "")
+                                    or card_familiar.get("nombre", "")
+                                    or ""
+                                ).strip(),
                             ]
                             if x
                         )
                     ),
-                    "primer_apellido": str(fields.get("familiar_apellidos", "") or card_familiar.get("apellidos", "") or ""),
-                    "nombre": str(fields.get("familiar_nombre", "") or card_familiar.get("nombre", "") or ""),
+                    "primer_apellido": str(
+                        fields.get("familiar_apellidos", "")
+                        or card_familiar.get("apellidos", "")
+                        or ""
+                    ),
+                    "nombre": str(
+                        fields.get("familiar_nombre", "")
+                        or card_familiar.get("nombre", "")
+                        or ""
+                    ),
                 }
             },
             "captcha": payload.get("captcha") or {"manual": True},
-            "download": payload.get("download") or {"dir": "./downloads", "filename_prefix": "tasa790_012"},
+            "download": payload.get("download")
+            or {"dir": "./downloads", "filename_prefix": "tasa790_012"},
         }
         return _apply_defaults(normalized)
 
@@ -462,15 +559,25 @@ def _validate_phone(value: str, country_iso: str = "") -> tuple[bool, str]:
             return False, f"domicilio.telefono must start with +{code} for {iso}."
         local = f"{full_code[len(code):]}{rest}"
         if len(local) < min_digits or len(local) > max_digits:
-            expected = f"{min_digits}" if min_digits == max_digits else f"{min_digits}-{max_digits}"
-            return False, f"domicilio.telefono for {iso} must have {expected} digits after country code."
+            expected = (
+                f"{min_digits}"
+                if min_digits == max_digits
+                else f"{min_digits}-{max_digits}"
+            )
+            return (
+                False,
+                f"domicilio.telefono for {iso} must have {expected} digits after country code.",
+            )
         return True, ""
 
     digits_only = re.sub(r"\D", "", compact)
     if match_plus:
         local = match_plus.group(2)
         if len(local) < 6 or len(local) > 12:
-            return False, "domicilio.telefono international number must have 6-12 digits after country code."
+            return (
+                False,
+                "domicilio.telefono international number must have 6-12 digits after country code.",
+            )
         return True, ""
     if len(digits_only) < 6 or len(digits_only) > 15:
         return False, "domicilio.telefono must have 6-15 digits."
@@ -492,7 +599,9 @@ def validate_payload(payload: dict[str, Any], *, require_tramite: bool = True) -
         raise ValidationError("\n".join(errors))
 
 
-def collect_validation_issues(payload: dict[str, Any], *, require_tramite: bool = True) -> list[dict[str, str]]:
+def collect_validation_issues(
+    payload: dict[str, Any], *, require_tramite: bool = True
+) -> list[dict[str, str]]:
     issues: list[dict[str, str]] = []
 
     def add(code: str, field: str, message: str) -> None:
@@ -520,39 +629,69 @@ def collect_validation_issues(payload: dict[str, Any], *, require_tramite: bool 
             add("missing_required", field, f"Missing required field: {field}")
 
     nif_nie = str(_pick(payload, "identificacion", "nif_nie") or "").strip().upper()
-    if nif_nie and not re.fullmatch(r"(?:[XYZ]\d{7}[A-Z]|\d{8}[A-Z]|[A-Z0-9\-]{5,20})", nif_nie):
-        add("invalid_format", "identificacion.nif_nie", "identificacion.nif_nie has unexpected format.")
+    if nif_nie and not re.fullmatch(
+        r"(?:[XYZ]\d{7}[A-Z]|\d{8}[A-Z]|[A-Z0-9\-]{5,20})", nif_nie
+    ):
+        add(
+            "invalid_format",
+            "identificacion.nif_nie",
+            "identificacion.nif_nie has unexpected format.",
+        )
 
     cp = str(_pick(payload, "domicilio", "cp") or "").strip()
     if cp and not re.fullmatch(r"\d{5}", cp):
-        add("invalid_format", "domicilio.cp", "domicilio.cp must have exactly 5 digits.")
+        add(
+            "invalid_format", "domicilio.cp", "domicilio.cp must have exactly 5 digits."
+        )
 
     telefono = str(_pick(payload, "domicilio", "telefono") or "").strip()
-    telefono_country_iso = str(_pick(payload, "extra", "telefono_country_iso") or "").strip()
+    telefono_country_iso = str(
+        _pick(payload, "extra", "telefono_country_iso") or ""
+    ).strip()
     phone_valid, phone_error = _validate_phone(telefono, telefono_country_iso)
     if not phone_valid:
         add("invalid_format", "domicilio.telefono", phone_error)
 
     fecha = str(_pick(payload, "declarante", "fecha") or "").strip()
     if fecha and not _validate_date_ddmmyyyy(fecha):
-        add("invalid_format", "declarante.fecha", "declarante.fecha must be in dd/mm/yyyy format.")
+        add(
+            "invalid_format",
+            "declarante.fecha",
+            "declarante.fecha must be in dd/mm/yyyy format.",
+        )
 
     forma_pago = str(_pick(payload, "ingreso", "forma_pago") or "").strip().lower()
     if forma_pago not in {"efectivo", "adeudo"}:
-        add("invalid_value", "ingreso.forma_pago", "ingreso.forma_pago must be 'efectivo' or 'adeudo'.")
+        add(
+            "invalid_value",
+            "ingreso.forma_pago",
+            "ingreso.forma_pago must be 'efectivo' or 'adeudo'.",
+        )
 
     if forma_pago == "adeudo":
         iban = str(_pick(payload, "ingreso", "iban") or "").strip()
         if not iban:
-            add("missing_required", "ingreso.iban", "ingreso.iban is required when forma_pago='adeudo'.")
+            add(
+                "missing_required",
+                "ingreso.iban",
+                "ingreso.iban is required when forma_pago='adeudo'.",
+            )
         elif not _validate_iban(iban):
             add("invalid_format", "ingreso.iban", "ingreso.iban format is invalid.")
 
-    autoliquidacion = str(_pick(payload, "autoliquidacion", "tipo") or "principal").strip().lower()
+    autoliquidacion = (
+        str(_pick(payload, "autoliquidacion", "tipo") or "principal").strip().lower()
+    )
     if autoliquidacion not in {"principal", "complementaria"}:
-        add("invalid_value", "autoliquidacion.tipo", "autoliquidacion.tipo must be 'principal' or 'complementaria'.")
+        add(
+            "invalid_value",
+            "autoliquidacion.tipo",
+            "autoliquidacion.tipo must be 'principal' or 'complementaria'.",
+        )
     if autoliquidacion == "complementaria":
-        num_justificante = str(_pick(payload, "autoliquidacion", "num_justificante") or "").strip()
+        num_justificante = str(
+            _pick(payload, "autoliquidacion", "num_justificante") or ""
+        ).strip()
         importe = _pick(payload, "autoliquidacion", "importe_complementaria")
         if not num_justificante:
             add(
@@ -575,7 +714,9 @@ def collect_validation_issues(payload: dict[str, Any], *, require_tramite: bool 
         "por cada documento",
     ]
     if any(k in opcion_text for k in needs_count_keywords):
-        if _pick(payload, "tramite", "cantidad") in (None, "") and _pick(payload, "tramite", "dias") in (None, ""):
+        if _pick(payload, "tramite", "cantidad") in (None, "") and _pick(
+            payload, "tramite", "dias"
+        ) in (None, ""):
             add(
                 "missing_required",
                 "tramite.cantidad",
@@ -585,5 +726,10 @@ def collect_validation_issues(payload: dict[str, Any], *, require_tramite: bool 
     return issues
 
 
-def collect_validation_errors(payload: dict[str, Any], *, require_tramite: bool = True) -> list[str]:
-    return [item["message"] for item in collect_validation_issues(payload, require_tramite=require_tramite)]
+def collect_validation_errors(
+    payload: dict[str, Any], *, require_tramite: bool = True
+) -> list[str]:
+    return [
+        item["message"]
+        for item in collect_validation_issues(payload, require_tramite=require_tramite)
+    ]

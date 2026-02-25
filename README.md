@@ -10,12 +10,11 @@
 
 ## Структура
 
-- `main.py` — CLI и запуск сценария
-- `form_filler.py` — логика заполнения, выбор Trámite, скачивание
-- `validators.py` — загрузка и валидация входного JSON
-- `ocr_main.py` — OCR + pipeline orchestration
-- `pipeline_runner.py` — стадии pipeline, артефакты, handoff-контракт для UI
-- `crm_mapper.py` — маппинг в CRM-профиль клиента
+- `web_api.py` — API backend (FastAPI)
+- `ui/` — веб-интерфейс (Next.js)
+- `app/autofill/*` — логика autofill/manual handoff
+- `app/pipeline/*` — стадии pipeline и артефакты
+- `app/crm/*` — CRM-профиль и операции с документами
 
 ## Требования
 
@@ -204,81 +203,29 @@ docker compose -f docker-compose.pi3.yml up --build
 }
 ```
 
-## Запуск
+## API-only режим
 
-### Из файла
-
-```bash
-python main.py --json ./input_payload.json
-```
+CLI-скрипты удалены. Поддерживаются только API и UI флоу.
 
 По умолчанию:
 - `Trámite` **не** выбирается автоматически;
 - CAPTCHA **не** обходится;
-- скачивание выполняет человек в браузере.
+- скачивание выполняет человек в браузере (manual handoff через UI/browser-session).
 
-Можно передавать и OCR-выход (например `output.jsonl` или JSON-документ с `form_790_012` / `forms.790_012`) — скрипт автоматически сделает маппинг полей.
-Если в OCR не хватает обязательных полей, скрипт интерактивно спросит их в терминале. Для `Trámite` сначала предложит выбрать группу, затем опцию.
-
-Для OCR-пайплайна (`python ocr_main.py`) выход в `output.jsonl` теперь включает:
-- `forms.790_012.fields.email`
-- `forms.mi_t.fields.email` (если детектирована форма MI-T или задан `TASA_CODE=mi_t`)
-- `forms.visual_generic` для сканов/изображений/рукописных PDF с мягкой (low-confidence) эвристикой.
-
-### Режим visual OCR (рукописные формы)
-
-Для “другого типа тасы” с плохим OCR можно включить:
-
-```bash
-TASA_CODE=visual_generic python ocr_main.py
-```
-
-Особенности:
-- парсер старается вытащить максимум по лейблам (`NIF/NIE`, `APELLIDOS`, `NOMBRE`, `DOMICILIO`, `CP`, `EMAIL`, `FORMA DE PAGO` и т.д.);
-- валидация менее строгая (не блокирует документ, если часть полей не распознана);
-- в `validation.warnings` добавляется пометка `Visual OCR mode: low-confidence handwritten extraction.`
-
-### Из JSON-строки
-
-```bash
-python main.py --json '{"identificacion":{"nif_nie":"X1234567Z","nombre_apellidos":"A B, C"}, ... }'
-```
-
-### С флагами
-
-```bash
-python main.py \
-  --json ./input_payload.json \
-  --slowmo 120 \
-  --timeout 30000 \
-  --download-dir ./downloads
-```
-
-Флаги:
-
-- `--headless` — headless режим (обычно выключен, чтобы вручную ввести CAPTCHA)
-- `--slowmo` — задержка действий Playwright в мс
-- `--timeout` — таймаут ожиданий в мс
-- `--download-dir` — переопределить папку скачивания
-
-## Pipeline / CRM / UI-ready output
-
-`python ocr_main.py` теперь пишет в `output.jsonl`:
+Pipeline/CRM данные формируются и сохраняются API-процессом:
 - parsed form data (`forms.*`);
-- `crm_profile` для внутренней CRM;
-- `pipeline` со стадиями (`ocr`, `parse_extract_map`, `crm_mapping`) и артефактами;
-- `human_tasks` для UI handoff (`verify_filled_fields`, `submit_or_download_manually`).
-
-Это сделано под следующий шаг: веб-интерфейс загрузки документа и ручного выбора типа тасы/Trámite.
+- `crm_profile`;
+- `pipeline` со стадиями (`ocr`, `parse_extract_map`, `crm_mapping`);
+- `human_tasks` для handoff (`verify_filled_fields`, `submit_or_download_manually`).
 
 ## CAPTCHA режим
 
-Скрипт не обходит CAPTCHA. Он:
+Сервис не обходит CAPTCHA. Он:
 
 1. Заполняет все поля.
 2. Останавливается перед скачиванием.
-3. Печатает: `Введи CAPTCHA на странице и нажми Enter в терминале, чтобы продолжить.`
-4. После Enter нажимает `Descargar impreso rellenado`.
+3. Передает управление пользователю в browser-session.
+4. Пользователь вручную завершает CAPTCHA и скачивание.
 
 ## Логика выбора Trámite
 

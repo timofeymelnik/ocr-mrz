@@ -48,10 +48,16 @@ def verify_password(password: str, stored_hash: str) -> bool:
 def build_signed_token(payload: dict[str, Any], secret_key: str) -> str:
     """Create compact signed token using JWT-like 3-part structure."""
     header = {"alg": "HS256", "typ": "JWT"}
-    header_part = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_part = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    header_part = _b64url_encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    )
+    payload_part = _b64url_encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
     signing_input = f"{header_part}.{payload_part}".encode("utf-8")
-    signature = hmac.new(secret_key.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    signature = hmac.new(
+        secret_key.encode("utf-8"), signing_input, hashlib.sha256
+    ).digest()
     signature_part = _b64url_encode(signature)
     return f"{header_part}.{payload_part}.{signature_part}"
 
@@ -64,7 +70,9 @@ def decode_signed_token(token: str, secret_key: str) -> dict[str, Any]:
         raise ValueError("Malformed token") from exc
 
     signing_input = f"{header_part}.{payload_part}".encode("utf-8")
-    expected_sig = hmac.new(secret_key.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    expected_sig = hmac.new(
+        secret_key.encode("utf-8"), signing_input, hashlib.sha256
+    ).digest()
     got_sig = _b64url_decode(signature_part)
     if not hmac.compare_digest(expected_sig, got_sig):
         raise ValueError("Invalid token signature")
@@ -74,6 +82,8 @@ def decode_signed_token(token: str, secret_key: str) -> dict[str, Any]:
         payload = json.loads(payload_raw.decode("utf-8"))
     except Exception as exc:
         raise ValueError("Invalid token payload") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid token payload type")
 
     exp = int(payload.get("exp") or 0)
     if exp and exp < int(time.time()):
