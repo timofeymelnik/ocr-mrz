@@ -13,6 +13,20 @@ services:
       timeout: 5s
       retries: 10
 
+  mongo-express:
+    image: mongo-express:1.0.2
+    platform: linux/arm64
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USER:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-change-me}
+    depends_on:
+      mongo:
+        condition: service_healthy
+
   api:
     build:
       context: .
