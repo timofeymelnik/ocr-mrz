@@ -1,6 +1,6 @@
 services:
   mongo:
-    image: mongo:7.0
+    image: mongo:4.4.18
     platform: linux/arm64
     restart: unless-stopped
     ports:
@@ -8,7 +8,7 @@ services:
     volumes:
       - mongo_data:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      test: ["CMD", "mongo", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
       interval: 10s
       timeout: 5s
       retries: 10
