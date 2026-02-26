@@ -24,6 +24,26 @@ DEFAULT_MAPPING_COLLECTION = "form_mappings"
 MAX_PREVIEW_ITEMS = 10
 
 
+def _sanitize_for_mongo(value: Any) -> Any:
+    """Sanitize nested payload to be safe for MongoDB document storage."""
+    if isinstance(value, list):
+        return [_sanitize_for_mongo(item) for item in value]
+    if isinstance(value, dict):
+        if set(value.keys()) == {"$oid"}:
+            return str(value.get("$oid") or "")
+        if set(value.keys()) == {"$date"}:
+            return _sanitize_for_mongo(value.get("$date"))
+        cleaned: dict[str, Any] = {}
+        for raw_key, raw_val in value.items():
+            key = str(raw_key)
+            if key.startswith("$"):
+                key = f"mongo_{key[1:]}"
+            key = key.replace(".", "_")
+            cleaned[key] = _sanitize_for_mongo(raw_val)
+        return cleaned
+    return value
+
+
 def _parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -291,9 +311,10 @@ def _upsert_by_key(
     if dry_run:
         return len(source_map), inserted_candidates
     for row in source_map.values():
+        sanitized = _sanitize_for_mongo(row)
         collection.update_one(
             query_builder(row),
-            {"$set": row},
+            {"$set": sanitized},
             upsert=True,
         )
     return len(source_map), inserted_candidates
